@@ -45,9 +45,10 @@ def main():
     parser.add_argument("dockerfile", help="Path to Dockerfile")
     parser.add_argument("source_dir", help="Path to the source directory")
     parser.add_argument(
-        "--exclude-dirs", nargs="*", default=[], help="Directories to exclude"
+        "-e", "--exclude-dirs", nargs="*", default=[], help="Directories to exclude"
     )
     parser.add_argument(
+        "-x",
         "--exclude-exts",
         nargs="*",
         default=[],
