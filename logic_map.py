@@ -119,6 +119,11 @@ def _add_children(
             _add_children(
                 child_branch, child, nodes, max_len=max_len, show_lineno=show_lineno
             )
+        else:
+            # Keep descending to find deeper matches beneath wrapper nodes.
+            _add_children(
+                branch, child, nodes, max_len=max_len, show_lineno=show_lineno
+            )
 
 
 def _to_source(obj: str | pathlib.Path | FunctionType | ModuleType) -> tuple[str, str]:
