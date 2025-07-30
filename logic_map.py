@@ -37,6 +37,30 @@ EXIT_NODES = (ast.Return, ast.Break, ast.Continue)
 RAISE_NODES = (ast.Raise,)
 
 
+def _with_lineno_text(text: str, lineno: int | None, show: bool) -> str:
+    return f"{text} [dim](L{lineno})[/]" if show and lineno is not None else text
+
+
+def _add_stmt_list(
+    branch: Tree,
+    stmts: list[ast.stmt],
+    nodes: tuple[type[ast.AST], ...],
+    *,
+    max_len: int,
+    show_lineno: bool,
+) -> None:
+    for stmt in stmts:
+        if isinstance(stmt, nodes):
+            child_branch = branch.add(
+                _label(stmt, max_len=max_len, show_lineno=show_lineno)
+            )
+            _add_children(
+                child_branch, stmt, nodes, max_len=max_len, show_lineno=show_lineno
+            )
+        else:
+            _add_children(branch, stmt, nodes, max_len=max_len, show_lineno=show_lineno)
+
+
 def _expr(node: ast.AST, max_len: int = 60) -> str:
     """Return source for *node*, truncated nicely."""
     try:
@@ -110,7 +134,98 @@ def _add_children(
     max_len: int,
     show_lineno: bool,
 ) -> None:
-    """Recursively add logical children that belong to *node*."""
+    # ── Special handling for 'try' so we show except/else/finally ─────────
+    if isinstance(node, ast.Try):
+        # Body under the existing "try" label
+        _add_stmt_list(
+            branch, node.body, nodes, max_len=max_len, show_lineno=show_lineno
+        )
+
+        # Each 'except' block as its own labeled branch
+        for h in node.handlers:
+            exc = _expr(h.type, max_len) if h.type is not None else ""
+            name = f" as {h.name}" if getattr(h, "name", None) else ""
+            label = "[magenta]except[/]" + (f" {exc}{name}" if exc or name else "")
+            exc_branch = branch.add(
+                _with_lineno_text(label, getattr(h, "lineno", None), show_lineno)
+            )
+            _add_stmt_list(
+                exc_branch, h.body, nodes, max_len=max_len, show_lineno=show_lineno
+            )
+
+        # Optional 'else'
+        if node.orelse:
+            # best-effort line number: the first stmt in else, if any
+            ln = getattr(node.orelse[0], "lineno", None) if node.orelse else None
+            else_branch = branch.add(
+                _with_lineno_text("[magenta]else[/]", ln, show_lineno)
+            )
+            _add_stmt_list(
+                else_branch,
+                node.orelse,
+                nodes,
+                max_len=max_len,
+                show_lineno=show_lineno,
+            )
+
+        # Optional 'finally'
+        if node.finalbody:
+            ln = getattr(node.finalbody[0], "lineno", None) if node.finalbody else None
+            fin_branch = branch.add(
+                _with_lineno_text("[magenta]finally[/]", ln, show_lineno)
+            )
+            _add_stmt_list(
+                fin_branch,
+                node.finalbody,
+                nodes,
+                max_len=max_len,
+                show_lineno=show_lineno,
+            )
+        return
+
+    # ── 'if' with explicit 'else' branch (keeps 'then' implicit) ──────────
+    if isinstance(node, ast.If):
+        _add_stmt_list(
+            branch, node.body, nodes, max_len=max_len, show_lineno=show_lineno
+        )
+        if node.orelse:
+            ln = getattr(node.orelse[0], "lineno", None)
+            else_branch = branch.add(
+                _with_lineno_text(
+                    "[magenta]else//[/]".replace("//", ""), ln, show_lineno
+                )
+            )  # "[magenta]else[/]"
+            _add_stmt_list(
+                else_branch,
+                node.orelse,
+                nodes,
+                max_len=max_len,
+                show_lineno=show_lineno,
+            )
+        return
+
+    # ── Loop 'else' (runs when loop isn't broken) ─────────────────────────
+    if isinstance(node, (ast.For, ast.While)):
+        # Loop body
+        # (Note: the loop node itself already has a label in the tree)
+        _add_stmt_list(
+            branch, node.body, nodes, max_len=max_len, show_lineno=show_lineno
+        )
+        if node.orelse:
+            ln = getattr(node.orelse[0], "lineno", None)
+            else_branch = branch.add(
+                _with_lineno_text("[magenta]else[/]", ln, show_lineno)
+            )
+            _add_stmt_list(
+                else_branch,
+                node.orelse,
+                nodes,
+                max_len=max_len,
+                show_lineno=show_lineno,
+            )
+        return
+
+    # ── Generic descent (unchanged behavior) ──────────────────────────────
     for child in ast.iter_child_nodes(node):
         if isinstance(child, nodes):
             child_branch = branch.add(
@@ -120,7 +235,6 @@ def _add_children(
                 child_branch, child, nodes, max_len=max_len, show_lineno=show_lineno
             )
         else:
-            # Keep descending to find deeper matches beneath wrapper nodes.
             _add_children(
                 branch, child, nodes, max_len=max_len, show_lineno=show_lineno
             )
@@ -145,6 +259,7 @@ def show_logic_map(
     include_raises: bool = False,
     show_lineno: bool = False,
     expr_width: int = 60,
+    use_pager: bool = False,
 ) -> None:
     name, source = _to_source(target)
     root = ast.parse(source, filename=name)
@@ -155,7 +270,13 @@ def show_logic_map(
     if include_raises:
         nodes += RAISE_NODES
     _add_children(tree, root, nodes, max_len=expr_width, show_lineno=show_lineno)
-    Console().print(tree)
+    console = Console(force_terminal=use_pager)
+    if use_pager:
+        # Keep styles and send to system pager (defaults to: less -R)
+        with console.pager(styles=True):
+            console.print(tree)
+    else:
+        console.print(tree)
 
 
 # --- CLI -------
@@ -183,6 +304,9 @@ if __name__ == "__main__":
         default=60,
         help="truncate expressions to this width (default: 60)",
     )
+    parser.add_argument(
+        "-p", "--pager", action="store_true", help="view in a pager (keeps ANSI colors)"
+    )
     args = parser.parse_args()
     show_logic_map(
         args.path,
@@ -190,4 +314,5 @@ if __name__ == "__main__":
         include_raises=args.raises,
         show_lineno=args.lineno,
         expr_width=args.max_expr_len,
+        use_pager=args.pager,
     )
