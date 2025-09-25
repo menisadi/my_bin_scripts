@@ -1,0 +1,15 @@
+#!/bin/bash
+API_KEY="${LASTFM_API_KEY:?Set LASTFM_API_KEY}"
+USER="${LASTFM_USERNAME:?Set LASTFM_USERNAME}"
+
+json=$(curl -s "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=$USER&api_key=$API_KEY&format=json&limit=1")
+
+artist=$(echo "$json" | jq -r '.recenttracks.track[0].artist["#text"]' | fribidi --nopad)
+title=$(echo "$json" | jq -r '.recenttracks.track[0].name' | fribidi --nopad)
+album=$(echo "$json" | jq -r '.recenttracks.track[0].album["#text"]' | fribidi --nopad)
+nowplaying=$(echo "$json" | jq -r '.recenttracks.track[0]["@attr"].nowplaying // empty')
+
+[ "$nowplaying" = "true" ] && echo "▶️ Now Playing"
+echo "Title : $title"
+echo "Artist: $artist"
+echo "Album : $album"
