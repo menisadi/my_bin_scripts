@@ -9,7 +9,12 @@ title=$(echo "$json" | jq -r '.recenttracks.track[0].name' | fribidi --nopad)
 album=$(echo "$json" | jq -r '.recenttracks.track[0].album["#text"]' | fribidi --nopad)
 nowplaying=$(echo "$json" | jq -r '.recenttracks.track[0]["@attr"].nowplaying // empty')
 
-[ "$nowplaying" = "true" ] && echo "▶️ Now Playing"
-echo "Title : $title"
-echo "Artist: $artist"
-echo "Album : $album"
+BOLD="\033[1m"
+RESET="\033[0m"
+COLOR="\033[36m" # cyan
+ICON="▸ "
+
+[ "$nowplaying" = "true" ] && echo -e "${ICON}${COLOR}Now Playing${RESET}"
+echo -e "${BOLD}${COLOR}Title :${RESET} $title"
+echo -e "${BOLD}${COLOR}Artist:${RESET} $artist"
+echo -e "${BOLD}${COLOR}Album :${RESET} $album"
