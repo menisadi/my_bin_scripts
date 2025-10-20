@@ -13,4 +13,4 @@ QUERY="$@"
 PROMPT="Based on the following request, provide a single, executable bash command. Do not provide any explanation, preamble, or markdown formatting. Just the command. Request: ${QUERY}"
 
 # Call the ollama CLI to get the command
-ollama run qwen2.5-coder:3b "${PROMPT}"
+ollama run qwen2.5-coder:1.5b "${PROMPT}"
