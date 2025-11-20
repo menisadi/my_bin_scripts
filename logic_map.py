@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# dependencies = ["rich"]
+# ///
 """
 logic_map.py – pretty-prints the logical structure of a Python file.
 
