@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: pbar [host] [interval_seconds]"
+  echo "Defaults: host=google.com, interval=1"
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+host="${1:-google.com}"
+interval="${2:-1}"
+
+trap 'echo' INT  # add newline on Ctrl-C
+
+G="\033[32m"
+Y="\033[33m"
+O="\033[38;5;208m"
+R="\033[31m"
+L="\033[90m"
+RESET="\033[0m"
+
+echo "pbar → $host (every ${interval}s)"
+ping -i "$interval" "$host" 2>/dev/null | awk -v G="$G" -v Y="$Y" -v O="$O" -v R="$R" -v L="$L" -v RESET="$RESET" '
+  BEGIN { ok="█"; loss="░"; }
+  /bytes from/ {
+    t=-1
+    if ($0 ~ /time=/ || $0 ~ /time</) {
+      n=split($0, parts, "time[=<]")
+      if (n > 1) {
+        sub(/ ms.*/, "", parts[2])
+        t = parts[2] + 0
+      }
+    }
+    if (t >= 0) {
+      if (t < 50)       printf G ok RESET;
+      else if (t < 100) printf Y ok RESET;
+      else if (t < 200) printf O ok RESET;
+      else              printf R ok RESET;
+      fflush();
+    }
+    next
+  }
+  /Request timeout|unreachable|Time to live exceeded|packet loss/ {
+    printf L loss RESET; fflush(); next
+  }
+'
