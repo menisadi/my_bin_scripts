@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# dependencies = ["rich"]
+# ///
 import re
 import argparse
 from pathlib import Path

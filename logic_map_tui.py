@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# dependencies = ["rich", "textual"]
+# ///
+import re
 """
 logic_map_tui.py – interactive, foldable AST viewer
 """

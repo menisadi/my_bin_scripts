@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env -S uv run
 """list_missing_docstrings.py
 
 Walk a file or directory tree and report every Python function that does **not**
