@@ -57,7 +57,14 @@ else
   fi
 fi
 
-echo "Starting pomodoro for ${minutes} minutes…"
+if [[ ! -f ~/bin/pomo.py ]]; then
+  echo "Error: ~/bin/pomo.py not found." >&2
+  exit 1
+fi
 
-# We rely on 'pom' being available in PATH
-pom "$minutes" -w $(( $(tput cols) * 80 / 100 ))
+# Check if uv is installed, if not revert to using python directly
+if command -v uv >/dev/null 2>&1; then
+  uv run ~/bin/pomo.py "$minutes" -w $(( $(tput cols) * 80 / 100 ))
+else
+  python3 ~/bin/pomo.py "$minutes" -w $(( $(tput cols) * 80 / 100 ))
+fi
