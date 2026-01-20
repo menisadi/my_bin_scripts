@@ -53,8 +53,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    print(f"Starting a {args.minutes}-minute pomodoro "
-          f"with bar width {args.width}…")
+    print(f"Starting a {args.minutes}-minute pomodoro ")
     pomodoro(args.minutes, args.width)
 
 if __name__ == "__main__":
