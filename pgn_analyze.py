@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run
 # /// script
-# dependencies = ["rich"]
+# dependencies = ["rich", "python-chess"]
 # ///
 import argparse
 import sys
