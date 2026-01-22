@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: pbar [host] [interval_seconds] [csv_path] [loc_refresh_seconds]"
+  echo "Defaults: host=google.com, interval=1, csv_path=./pbar.csv, loc_refresh=5"
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+host="${1:-google.com}"
+interval="${2:-1}"
+csv="${3:-./pbar.csv}"
+loc_refresh="${4:-5}"
+
+trap 'echo' INT  # add newline on Ctrl-C
+
+# --- colors (your original) ---
+G="\033[32m"
+Y="\033[33m"
+O="\033[38;5;208m"
+R="\033[31m"
+L="\033[90m"
+RESET="\033[0m"
+
+# --- pick a location command ---
+LOC_CMD="${LOC_CMD:-CoreLocationCLI}"
+if ! command -v "$LOC_CMD" >/dev/null 2>&1; then
+  echo "Error: '$LOC_CMD' not found. Install CoreLocationCLI (brew install --cask corelocationcli) or set LOC_CMD."
+  exit 1
+fi
+
+# --- background: refresh location into a temp file ---
+locfile="$(mktemp -t pbarloc.XXXXXX)"
+cleanup() {
+  [[ -n "${locpid:-}" ]] && kill "$locpid" >/dev/null 2>&1 || true
+  rm -f "$locfile" "$locfile.tmp"
+}
+trap cleanup EXIT INT TERM
+
+(
+  while true; do
+    # lat,lon,h_accuracy_m
+    "$LOC_CMD" --format "%latitude,%longitude,%h_accuracy" 2>/dev/null \
+      | tr -d '\n' > "${locfile}.tmp" && mv "${locfile}.tmp" "$locfile"
+    sleep "$loc_refresh"
+  done
+) &
+locpid=$!
+
+# CSV header
+if [[ ! -f "$csv" ]]; then
+  echo "ts,host,status,latency_ms,lat,lon,h_accuracy_m" > "$csv"
+fi
+
+echo "pbar → $host (every ${interval}s), logging → $csv"
+ping -i "$interval" "$host" 2>/dev/null | awk \
+  -v host="$host" -v out="$csv" -v locfile="$locfile" \
+  -v G="$G" -v Y="$Y" -v O="$O" -v R="$R" -v L="$L" -v RESET="$RESET" '
+  BEGIN { ok="█"; loss="░"; }
+
+  function get_loc(   line,a,n) {
+    line=""; close(locfile)
+    if ((getline line < locfile) > 0) {
+      close(locfile)
+      n=split(line,a,",")
+      lat=a[1]; lon=a[2]; acc=a[3]
+    } else {
+      close(locfile)
+      lat=""; lon=""; acc=""
+    }
+  }
+
+  function log_row(status, latency,   ts, cmd) {
+    cmd = "date +%Y-%m-%dT%H:%M:%S%z"
+    cmd | getline ts
+    close(cmd)
+
+    get_loc()
+    print ts "," host "," status "," latency "," lat "," lon "," acc >> out
+    fflush(out)
+  }
+
+  /bytes from/ {
+    t=-1
+    if ($0 ~ /time=/ || $0 ~ /time</) {
+      n=split($0, parts, "time[=<]")
+      if (n > 1) {
+        sub(/ ms.*/, "", parts[2])
+        t = parts[2] + 0
+      }
+    }
+
+    if (t >= 0) {
+      log_row("ok", t)
+
+      if (t < 50)       printf G ok RESET;
+      else if (t < 100) printf Y ok RESET;
+      else if (t < 200) printf O ok RESET;
+      else              printf R ok RESET;
+      fflush()
+    }
+    next
+  }
+
+  /Request timeout|unreachable|Time to live exceeded|packet loss/ {
+    log_row("loss", "")
+    printf L loss RESET; fflush(); next
+  }
+'
