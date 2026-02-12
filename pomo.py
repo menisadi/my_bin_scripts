@@ -5,9 +5,11 @@ import time
 DEFAULT_MINUTES = 25
 DEFAULT_BAR_WIDTH = 30
 
+
 def format_time(seconds_left: int) -> str:
     m, s = divmod(seconds_left, 60)
     return f"{m:02d}:{s:02d}"
+
 
 def pomodoro(minutes: int, bar_width: int) -> None:
     total_seconds = minutes * 60
@@ -34,6 +36,7 @@ def pomodoro(minutes: int, bar_width: int) -> None:
 
     print(f"\r[{'█' * bar_width}] 00:00  ✅ Done!")
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple terminal Pomodoro timer.")
     parser.add_argument(
@@ -44,18 +47,20 @@ def parse_args() -> argparse.Namespace:
         help=f"Length of the timer in minutes (default: {DEFAULT_MINUTES})",
     )
     parser.add_argument(
-        "-w", "--width",
+        "-w",
+        "--width",
         type=int,
         default=DEFAULT_BAR_WIDTH,
         help=f"Width of the progress bar (default: {DEFAULT_BAR_WIDTH})",
     )
     return parser.parse_args()
 
+
 def main() -> None:
     args = parse_args()
     print(f"Starting a {args.minutes}-minute pomodoro ")
     pomodoro(args.minutes, args.width)
 
+
 if __name__ == "__main__":
     main()
-
