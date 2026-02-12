@@ -57,13 +57,14 @@ def print_eval_bar(
     *,
     cap_cp: int = EVAL_CAP_CP,
     steps: int = 24,
+    wrap_width: int | None = None,
     title: str = "Evaluation bar (White POV)",
     show_legend: bool = True,
 ):
     if not evals_white_cp:
         return
 
-    usable_width = max(10, console.width - 2)
+    usable_width = max(10, int(wrap_width)) if wrap_width else max(10, console.width - 2)
     block_char = " "
     lines: list[Text] = []
 
@@ -301,6 +302,12 @@ if __name__ == "__main__":
         help="Number of grayscale shades to use (default: 24).",
     )
     parser.add_argument(
+        "--evalbar-wrap",
+        type=int,
+        default=0,
+        help="Blocks per evalbar line before wrapping (default: 0 = fit terminal width).",
+    )
+    parser.add_argument(
         "--evalbar-legend",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -325,5 +332,6 @@ if __name__ == "__main__":
                 evals,
                 cap_cp=args.evalbar_cap,
                 steps=args.evalbar_steps,
+                wrap_width=args.evalbar_wrap,
                 show_legend=args.evalbar_legend,
             )
