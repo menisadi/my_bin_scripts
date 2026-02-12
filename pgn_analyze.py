@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.panel import Panel
+from rich.text import Text
 
 console = Console()
 
@@ -23,6 +24,64 @@ EVAL_CAP_CP = 1000            # Lichess caps evals to [-1000, +1000] and maps ma
 INACCURACY_THRESHOLD = 50
 MISTAKE_THRESHOLD = 100
 BLUNDER_THRESHOLD = 300
+
+def cp_to_gray_level(cp: int, cap_cp: int, steps: int) -> int:
+    """
+    Map centipawns (White POV) to a grayscale level 0..255.
+    -cp cap => black (0), +cp cap => white (255), 0 => mid gray.
+    Quantize to `steps` levels to cope with limited terminal palettes.
+    """
+    cap_cp = max(1, int(cap_cp))
+    steps = int(steps)
+
+    cp = clamp(cp, -cap_cp, cap_cp)
+    t = (cp + cap_cp) / (2 * cap_cp)  # 0..1
+    level = int(round(t * 255))
+
+    if steps >= 2:
+        step = 255 / (steps - 1)
+        level = int(round(level / step) * step)
+
+    return clamp(level, 0, 255)
+
+
+
+def print_eval_bar(
+    evals_white_cp: list[int],
+    *,
+    cap_cp: int = EVAL_CAP_CP,
+    steps: int = 24,
+    title: str = "Evaluation bar (White POV)",
+    show_legend: bool = True,
+):
+    if not evals_white_cp:
+        return
+
+    usable_width = max(10, console.width - 2)
+    block_char = " "
+    lines: list[Text] = []
+
+    cur = Text()
+    for i, cp in enumerate(evals_white_cp, start=1):
+        g = cp_to_gray_level(cp, cap_cp=cap_cp, steps=steps)
+        cur.append(block_char, style=f"on rgb({g},{g},{g})")
+        if (i % usable_width) == 0:
+            lines.append(cur)
+            cur = Text()
+    if len(cur) > 0:
+        lines.append(cur)
+
+    if show_legend:
+        legend = Text()
+        legend.append(" Black ", style="on rgb(0,0,0)")
+        legend.append("  ≈0  ", style="on rgb(128,128,128)")
+        legend.append(" White ", style="on rgb(255,255,255)")
+        console.print(Panel.fit(legend, title=title, padding=(0, 1)))
+
+    for line in lines:
+        console.print(line)
+    console.print()
+
 
 
 def clamp(x: int, lo: int, hi: int) -> int:
@@ -41,7 +100,16 @@ def score_to_capped_cp(score: chess.engine.PovScore, pov: chess.Color) -> int:
     return clamp(raw, -EVAL_CAP_CP, EVAL_CAP_CP)
 
 
-def analyze_game(pgn_path: str, stockfish_path: str, depth: int = 14, threads: int | None = None, hash_mb: int | None = None):
+def analyze_game(
+    pgn_path: str,
+    stockfish_path: str,
+    depth: int = 14,
+    threads: int | None = None,
+    hash_mb: int | None = None,
+    collect_evals: bool = False,
+):
+    evals_white_cp: list[int] | None = [] if collect_evals else None
+
     try:
         engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
     except Exception as e:
@@ -67,7 +135,7 @@ def analyze_game(pgn_path: str, stockfish_path: str, depth: int = 14, threads: i
 
         if not game:
             console.print("[bold red]Error:[/bold red] No game found in PGN file.")
-            return None, None
+            return None, None, None
 
         total_plies = sum(1 for _ in game.mainline_moves())
         board = game.board()
@@ -106,6 +174,9 @@ def analyze_game(pgn_path: str, stockfish_path: str, depth: int = 14, threads: i
                 info = engine.analyse(board, chess.engine.Limit(depth=depth))
                 eval_white_cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
 
+                if evals_white_cp is not None:
+                    evals_white_cp.append(eval_white_cp)
+
                 # Loss from mover POV:
                 # - If White moved: loss = max(0, prev_white_eval - new_white_eval)
                 # - If Black moved: loss = max(0, prev_black_eval - new_black_eval)
@@ -128,14 +199,13 @@ def analyze_game(pgn_path: str, stockfish_path: str, depth: int = 14, threads: i
                 prev_eval_white_cp = eval_white_cp
                 progress.update(task, advance=1)
 
-        return stats, game.headers
+        return stats, game.headers, evals_white_cp
 
     finally:
         try:
             engine.quit()
         except Exception:
             pass
-
 
 def print_report(stats, headers):
     table = Table(show_header=True, header_style="bold magenta", box=None)
@@ -165,15 +235,40 @@ if __name__ == "__main__":
     parser.add_argument("--depth", type=int, default=14, help="Analysis depth (higher = slower)")
     parser.add_argument("--threads", type=int, default=None, help="Stockfish Threads (optional)")
     parser.add_argument("--hash", type=int, default=None, help="Stockfish Hash in MB (optional)")
+    parser.add_argument("--evalbar", action="store_true", help="Print a grayscale evaluation bar (one block per ply).")
+    parser.add_argument("--evalbar-cap", type=int, default=400, help="Centipawn cap for mapping to grayscale (default: 400).")
+    parser.add_argument("--evalbar-steps", type=int, default=24, help="Number of grayscale shades to use (default: 24).")
+    parser.add_argument(
+        "--evalbar-legend",
+        dest="evalbar_legend",
+        action="store_true",
+        default=True,
+        help="Show the evaluation bar legend (default: on).",
+    )
+    parser.add_argument(
+        "--no-evalbar-legend",
+        dest="evalbar_legend",
+        action="store_false",
+        help="Hide the evaluation bar legend.",
+    )
 
     args = parser.parse_args()
 
-    results, headers = analyze_game(
+    results, headers, evals = analyze_game(
         args.pgn,
         args.engine,
         depth=args.depth,
         threads=args.threads,
         hash_mb=args.hash,
-    )
+        collect_evals=args.evalbar,
+    )    
+
     if results:
         print_report(results, headers)
+        if args.evalbar and evals:
+            print_eval_bar(
+                evals,
+                cap_cp=args.evalbar_cap,
+                steps=args.evalbar_steps,
+                show_legend=args.evalbar_legend,
+            )
