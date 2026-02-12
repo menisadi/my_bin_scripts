@@ -2,7 +2,7 @@
 # /// script
 # dependencies = ["rich"]
 # ///
-import re
+
 """
 logic_map_tui.py – interactive, foldable AST viewer
 """
