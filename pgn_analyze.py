@@ -10,20 +10,27 @@ import chess.pgn
 import chess.engine
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+)
 from rich.panel import Panel
 from rich.text import Text
 
 console = Console()
 
 # --- Lichess-ish ACPL knobs ---
-LICHESS_START_CP_WHITE = 15   # Lichess uses +15cp as the starting eval for White
-EVAL_CAP_CP = 1000            # Lichess caps evals to [-1000, +1000] and maps mates to +/-1000
+LICHESS_START_CP_WHITE = 15  # Lichess uses +15cp as the starting eval for White
+EVAL_CAP_CP = 1000  # Lichess caps evals to [-1000, +1000] and maps mates to +/-1000
 
 # --- Your classification thresholds (in centipawns of loss) ---
 INACCURACY_THRESHOLD = 50
 MISTAKE_THRESHOLD = 100
 BLUNDER_THRESHOLD = 300
+
 
 def cp_to_gray_level(cp: int, cap_cp: int, steps: int) -> int:
     """
@@ -43,7 +50,6 @@ def cp_to_gray_level(cp: int, cap_cp: int, steps: int) -> int:
         level = int(round(level / step) * step)
 
     return clamp(level, 0, 255)
-
 
 
 def print_eval_bar(
@@ -83,7 +89,6 @@ def print_eval_bar(
     console.print()
 
 
-
 def clamp(x: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, x))
 
@@ -113,7 +118,9 @@ def analyze_game(
     try:
         engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
     except Exception as e:
-        console.print(f"[bold red]Error:[/bold red] Could not start Stockfish at {stockfish_path}. {e}")
+        console.print(
+            f"[bold red]Error:[/bold red] Could not start Stockfish at {stockfish_path}. {e}"
+        )
         sys.exit(1)
 
     try:
@@ -141,8 +148,20 @@ def analyze_game(
         board = game.board()
 
         stats = {
-            chess.WHITE: {"cpl_total": 0, "moves": 0, "inaccuracies": 0, "mistakes": 0, "blunders": 0},
-            chess.BLACK: {"cpl_total": 0, "moves": 0, "inaccuracies": 0, "mistakes": 0, "blunders": 0},
+            chess.WHITE: {
+                "cpl_total": 0,
+                "moves": 0,
+                "inaccuracies": 0,
+                "mistakes": 0,
+                "blunders": 0,
+            },
+            chess.BLACK: {
+                "cpl_total": 0,
+                "moves": 0,
+                "inaccuracies": 0,
+                "mistakes": 0,
+                "blunders": 0,
+            },
         }
 
         # Header Panel
@@ -152,7 +171,11 @@ def analyze_game(
             f"[cyan]Result:[/cyan] [bold yellow]{game.headers.get('Result', '*')}[/bold yellow] | "
             f"[cyan]Depth:[/cyan] {depth}"
         )
-        console.print(Panel(header_info, title="[bold blue]Chess Analysis[/bold blue]", expand=False))
+        console.print(
+            Panel(
+                header_info, title="[bold blue]Chess Analysis[/bold blue]", expand=False
+            )
+        )
 
         # Lichess-style: use a sequence of evals (from White POV) AFTER each ply,
         # with a fixed starting eval of +15cp for White at ply 0.
@@ -207,6 +230,7 @@ def analyze_game(
         except Exception:
             pass
 
+
 def print_report(stats, headers):
     table = Table(show_header=True, header_style="bold magenta", box=None)
     table.add_column("Metric", style="dim", width=15)
@@ -220,36 +244,67 @@ def print_report(stats, headers):
     b_avg_cpl = (b["cpl_total"] / b["moves"]) if b["moves"] else 0.0
 
     table.add_row("Avg CPL", f"{w_avg_cpl:.1f}", f"{b_avg_cpl:.1f}")
-    table.add_row("Inaccuracies", f"[yellow]{w['inaccuracies']}[/yellow]", f"[yellow]{b['inaccuracies']}[/yellow]")
-    table.add_row("Mistakes", f"[orange3]{w['mistakes']}[/orange3]", f"[orange3]{b['mistakes']}[/orange3]")
-    table.add_row("Blunders", f"[bold red]{w['blunders']}[/bold red]", f"[bold red]{b['blunders']}[/bold red]")
+    table.add_row(
+        "Inaccuracies",
+        f"[yellow]{w['inaccuracies']}[/yellow]",
+        f"[yellow]{b['inaccuracies']}[/yellow]",
+    )
+    table.add_row(
+        "Mistakes",
+        f"[orange3]{w['mistakes']}[/orange3]",
+        f"[orange3]{b['mistakes']}[/orange3]",
+    )
+    table.add_row(
+        "Blunders",
+        f"[bold red]{w['blunders']}[/bold red]",
+        f"[bold red]{b['blunders']}[/bold red]",
+    )
 
     console.print(table)
-    console.print(f"\n[dim]Analysis completed for {w['moves'] + b['moves']} total plies.[/dim]\n")
+    console.print(
+        f"\n[dim]Analysis completed for {w['moves'] + b['moves']} total plies.[/dim]\n"
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Analyze a PGN file using Stockfish (Lichess-ish ACPL).")
+    parser = argparse.ArgumentParser(
+        description="Analyze a PGN file using Stockfish (Lichess-ish ACPL)."
+    )
     parser.add_argument("pgn", help="Path to the PGN file")
-    parser.add_argument("--engine", default="stockfish", help="Path to Stockfish binary")
-    parser.add_argument("--depth", type=int, default=14, help="Analysis depth (higher = slower)")
-    parser.add_argument("--threads", type=int, default=None, help="Stockfish Threads (optional)")
-    parser.add_argument("--hash", type=int, default=None, help="Stockfish Hash in MB (optional)")
-    parser.add_argument("--evalbar", action="store_true", help="Print a grayscale evaluation bar (one block per ply).")
-    parser.add_argument("--evalbar-cap", type=int, default=400, help="Centipawn cap for mapping to grayscale (default: 400).")
-    parser.add_argument("--evalbar-steps", type=int, default=24, help="Number of grayscale shades to use (default: 24).")
     parser.add_argument(
-        "--evalbar-legend",
-        dest="evalbar_legend",
-        action="store_true",
-        default=True,
-        help="Show the evaluation bar legend (default: on).",
+        "--engine", default="stockfish", help="Path to Stockfish binary"
     )
     parser.add_argument(
-        "--no-evalbar-legend",
-        dest="evalbar_legend",
-        action="store_false",
-        help="Hide the evaluation bar legend.",
+        "--depth", type=int, default=14, help="Analysis depth (higher = slower)"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=None, help="Stockfish Threads (optional)"
+    )
+    parser.add_argument(
+        "--hash", type=int, default=None, help="Stockfish Hash in MB (optional)"
+    )
+    parser.add_argument(
+        "--evalbar",
+        action="store_true",
+        help="Print a grayscale evaluation bar (one block per ply).",
+    )
+    parser.add_argument(
+        "--evalbar-cap",
+        type=int,
+        default=400,
+        help="Centipawn cap for mapping to grayscale (default: 400).",
+    )
+    parser.add_argument(
+        "--evalbar-steps",
+        type=int,
+        default=24,
+        help="Number of grayscale shades to use (default: 24).",
+    )
+    parser.add_argument(
+        "--evalbar-legend",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show/hide the evaluation bar legend (default: on).",
     )
 
     args = parser.parse_args()
@@ -261,7 +316,7 @@ if __name__ == "__main__":
         threads=args.threads,
         hash_mb=args.hash,
         collect_evals=args.evalbar,
-    )    
+    )
 
     if results:
         print_report(results, headers)
