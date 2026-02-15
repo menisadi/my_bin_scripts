@@ -4,6 +4,7 @@
 # ///
 import argparse
 import sys
+from pathlib import Path
 
 import chess
 import chess.pgn
@@ -315,6 +316,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    pgn_path = Path(args.pgn)
+    if not pgn_path.is_file():
+        parser.error(f"PGN file not found: {args.pgn}")
 
     results, headers, evals = analyze_game(
         args.pgn,
