@@ -114,6 +114,7 @@ def analyze_game(
     threads: int | None = None,
     hash_mb: int | None = None,
     collect_evals: bool = False,
+    show_header: bool = True,
 ):
     evals_white_cp: list[int] | None = [] if collect_evals else None
     interrupted = False
@@ -168,18 +169,18 @@ def analyze_game(
             },
         }
 
-        # Header Panel
-        header_info = (
-            f"[bold white]{game.headers.get('White', 'Unknown')}[/bold white] vs "
-            f"[bold white]{game.headers.get('Black', 'Unknown')}[/bold white]\n"
-            f"[cyan]Result:[/cyan] [bold yellow]{game.headers.get('Result', '*')}[/bold yellow] | "
-            f"[cyan]Depth:[/cyan] {depth}"
-        )
-        console.print(
-            Panel(
-                header_info, title="[bold blue]Chess Analysis[/bold blue]", expand=False
+        if show_header:
+            header_info = (
+                f"[bold white]{game.headers.get('White', 'Unknown')}[/bold white] vs "
+                f"[bold white]{game.headers.get('Black', 'Unknown')}[/bold white]\n"
+                f"[cyan]Result:[/cyan] [bold yellow]{game.headers.get('Result', '*')}[/bold yellow] | "
+                f"[cyan]Depth:[/cyan] {depth}"
             )
-        )
+            console.print(
+                Panel(
+                    header_info, title="[bold blue]Chess Analysis[/bold blue]", expand=False
+                )
+            )
 
         # Lichess-style: use a sequence of evals (from White POV) AFTER each ply,
         # with a fixed starting eval of +15cp for White at ply 0.
@@ -239,36 +240,48 @@ def analyze_game(
             pass
 
 
-def print_report(stats, headers, total_plies: int | None = None, interrupted: bool = False):
-    table = Table(show_header=True, header_style="bold magenta", box=None)
-    table.add_column("Metric", style="dim", width=15)
-    table.add_column("White", justify="center", width=10)
-    table.add_column("Black", justify="center", width=10)
-
+def print_report(
+    stats,
+    headers,
+    total_plies: int | None = None,
+    interrupted: bool = False,
+    show_error_summary: bool = True,
+    show_completion_summary: bool = True,
+):
     w = stats[chess.WHITE]
     b = stats[chess.BLACK]
 
-    w_avg_cpl = (w["cpl_total"] / w["moves"]) if w["moves"] else 0.0
-    b_avg_cpl = (b["cpl_total"] / b["moves"]) if b["moves"] else 0.0
+    if show_error_summary:
+        table = Table(show_header=True, header_style="bold magenta", box=None)
+        table.add_column("Metric", style="dim", width=15)
+        table.add_column("White", justify="center", width=10)
+        table.add_column("Black", justify="center", width=10)
 
-    table.add_row("Avg CPL", f"{w_avg_cpl:.1f}", f"{b_avg_cpl:.1f}")
-    table.add_row(
-        "Inaccuracies",
-        f"[yellow]{w['inaccuracies']}[/yellow]",
-        f"[yellow]{b['inaccuracies']}[/yellow]",
-    )
-    table.add_row(
-        "Mistakes",
-        f"[orange3]{w['mistakes']}[/orange3]",
-        f"[orange3]{b['mistakes']}[/orange3]",
-    )
-    table.add_row(
-        "Blunders",
-        f"[bold red]{w['blunders']}[/bold red]",
-        f"[bold red]{b['blunders']}[/bold red]",
-    )
+        w_avg_cpl = (w["cpl_total"] / w["moves"]) if w["moves"] else 0.0
+        b_avg_cpl = (b["cpl_total"] / b["moves"]) if b["moves"] else 0.0
 
-    console.print(table)
+        table.add_row("Avg CPL", f"{w_avg_cpl:.1f}", f"{b_avg_cpl:.1f}")
+        table.add_row(
+            "Inaccuracies",
+            f"[yellow]{w['inaccuracies']}[/yellow]",
+            f"[yellow]{b['inaccuracies']}[/yellow]",
+        )
+        table.add_row(
+            "Mistakes",
+            f"[orange3]{w['mistakes']}[/orange3]",
+            f"[orange3]{b['mistakes']}[/orange3]",
+        )
+        table.add_row(
+            "Blunders",
+            f"[bold red]{w['blunders']}[/bold red]",
+            f"[bold red]{b['blunders']}[/bold red]",
+        )
+
+        console.print(table)
+
+    if not show_completion_summary:
+        return
+
     analyzed_plies = w["moves"] + b["moves"]
     if total_plies is not None:
         if interrupted:
@@ -302,9 +315,28 @@ if __name__ == "__main__":
         "--hash", type=int, default=None, help="Stockfish Hash in MB (optional)"
     )
     parser.add_argument(
+        "--header",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show/hide game header panel (default: on).",
+    )
+    parser.add_argument(
+        "--error-summary",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show/hide summary table with Avg CPL and error counts (default: on).",
+    )
+    parser.add_argument(
+        "--completion-summary",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show/hide completion line with analyzed ply count (default: on).",
+    )
+    parser.add_argument(
         "--evalbar",
-        action="store_true",
-        help="Print a grayscale evaluation bar (one block per ply).",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show/hide grayscale evaluation bar (default: off).",
     )
     parser.add_argument(
         "--evalbar-cap",
@@ -345,6 +377,7 @@ if __name__ == "__main__":
             threads=args.threads,
             hash_mb=args.hash,
             collect_evals=args.evalbar,
+            show_header=args.header,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Analysis interrupted.[/yellow]")
@@ -353,7 +386,14 @@ if __name__ == "__main__":
     if results:
         if interrupted:
             console.print("\n[yellow]Analysis interrupted. Showing partial results.[/yellow]")
-        print_report(results, headers, total_plies=total_plies, interrupted=interrupted)
+        print_report(
+            results,
+            headers,
+            total_plies=total_plies,
+            interrupted=interrupted,
+            show_error_summary=args.error_summary,
+            show_completion_summary=args.completion_summary,
+        )
         if args.evalbar and evals:
             print_eval_bar(
                 evals,
