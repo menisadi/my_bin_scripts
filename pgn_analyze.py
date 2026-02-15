@@ -116,6 +116,8 @@ def analyze_game(
     collect_evals: bool = False,
 ):
     evals_white_cp: list[int] | None = [] if collect_evals else None
+    interrupted = False
+    total_plies = 0
 
     try:
         engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
@@ -144,7 +146,7 @@ def analyze_game(
 
         if not game:
             console.print("[bold red]Error:[/bold red] No game found in PGN file.")
-            return None, None, None
+            return None, None, None, interrupted, total_plies
 
         total_plies = sum(1 for _ in game.mainline_moves())
         board = game.board()
@@ -192,39 +194,43 @@ def analyze_game(
         ) as progress:
             task = progress.add_task("Analyzing moves...", total=total_plies)
 
-            for move in game.mainline_moves():
-                mover = board.turn  # who is playing this move
-                board.push(move)
+            try:
+                for move in game.mainline_moves():
+                    mover = board.turn  # who is playing this move
+                    board.push(move)
 
-                info = engine.analyse(board, chess.engine.Limit(depth=depth))
-                eval_white_cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
+                    info = engine.analyse(board, chess.engine.Limit(depth=depth))
+                    eval_white_cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
 
-                if evals_white_cp is not None:
-                    evals_white_cp.append(eval_white_cp)
+                    if evals_white_cp is not None:
+                        evals_white_cp.append(eval_white_cp)
 
-                # Loss from mover POV:
-                # - If White moved: loss = max(0, prev_white_eval - new_white_eval)
-                # - If Black moved: loss = max(0, prev_black_eval - new_black_eval)
-                #   but black_eval = -white_eval, so loss = max(0, (-prev) - (-new)) = max(0, new - prev)
-                if mover == chess.WHITE:
-                    loss = max(0, prev_eval_white_cp - eval_white_cp)
-                else:
-                    loss = max(0, eval_white_cp - prev_eval_white_cp)
+                    # Loss from mover POV:
+                    # - If White moved: loss = max(0, prev_white_eval - new_white_eval)
+                    # - If Black moved: loss = max(0, prev_black_eval - new_black_eval)
+                    #   but black_eval = -white_eval, so loss = max(0, (-prev) - (-new)) = max(0, new - prev)
+                    if mover == chess.WHITE:
+                        loss = max(0, prev_eval_white_cp - eval_white_cp)
+                    else:
+                        loss = max(0, eval_white_cp - prev_eval_white_cp)
 
-                stats[mover]["cpl_total"] += loss
-                stats[mover]["moves"] += 1
+                    stats[mover]["cpl_total"] += loss
+                    stats[mover]["moves"] += 1
 
-                if loss >= BLUNDER_THRESHOLD:
-                    stats[mover]["blunders"] += 1
-                elif loss >= MISTAKE_THRESHOLD:
-                    stats[mover]["mistakes"] += 1
-                elif loss >= INACCURACY_THRESHOLD:
-                    stats[mover]["inaccuracies"] += 1
+                    if loss >= BLUNDER_THRESHOLD:
+                        stats[mover]["blunders"] += 1
+                    elif loss >= MISTAKE_THRESHOLD:
+                        stats[mover]["mistakes"] += 1
+                    elif loss >= INACCURACY_THRESHOLD:
+                        stats[mover]["inaccuracies"] += 1
 
-                prev_eval_white_cp = eval_white_cp
-                progress.update(task, advance=1)
+                    prev_eval_white_cp = eval_white_cp
+                    progress.update(task, advance=1)
+            except KeyboardInterrupt:
+                interrupted = True
+                progress.update(task, description="Stopping analysis...")
 
-        return stats, game.headers, evals_white_cp
+        return stats, game.headers, evals_white_cp, interrupted, total_plies
 
     finally:
         try:
@@ -233,7 +239,7 @@ def analyze_game(
             pass
 
 
-def print_report(stats, headers):
+def print_report(stats, headers, total_plies: int | None = None, interrupted: bool = False):
     table = Table(show_header=True, header_style="bold magenta", box=None)
     table.add_column("Metric", style="dim", width=15)
     table.add_column("White", justify="center", width=10)
@@ -263,9 +269,19 @@ def print_report(stats, headers):
     )
 
     console.print(table)
-    console.print(
-        f"\n[dim]Analysis completed for {w['moves'] + b['moves']} total plies.[/dim]\n"
-    )
+    analyzed_plies = w["moves"] + b["moves"]
+    if total_plies is not None:
+        if interrupted:
+            summary = (
+                f"Analysis interrupted after {analyzed_plies} total plies out of {total_plies}."
+            )
+        else:
+            summary = (
+                f"Analysis completed for {analyzed_plies} total plies out of {total_plies}."
+            )
+    else:
+        summary = f"Analysis completed for {analyzed_plies} total plies."
+    console.print(f"\n[dim]{summary}[/dim]\n")
 
 
 if __name__ == "__main__":
@@ -321,17 +337,23 @@ if __name__ == "__main__":
     if not pgn_path.is_file():
         parser.error(f"PGN file not found: {args.pgn}")
 
-    results, headers, evals = analyze_game(
-        args.pgn,
-        args.engine,
-        depth=args.depth,
-        threads=args.threads,
-        hash_mb=args.hash,
-        collect_evals=args.evalbar,
-    )
+    try:
+        results, headers, evals, interrupted, total_plies = analyze_game(
+            args.pgn,
+            args.engine,
+            depth=args.depth,
+            threads=args.threads,
+            hash_mb=args.hash,
+            collect_evals=args.evalbar,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Analysis interrupted.[/yellow]")
+        sys.exit(130)
 
     if results:
-        print_report(results, headers)
+        if interrupted:
+            console.print("\n[yellow]Analysis interrupted. Showing partial results.[/yellow]")
+        print_report(results, headers, total_plies=total_plies, interrupted=interrupted)
         if args.evalbar and evals:
             print_eval_bar(
                 evals,
