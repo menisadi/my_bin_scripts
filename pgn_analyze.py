@@ -142,8 +142,14 @@ def analyze_game(
                 # If some options don't exist for this engine build, just ignore.
                 pass
 
-        with open(pgn_path, "r", encoding="utf-8", errors="replace") as pgn_file:
-            game = chess.pgn.read_game(pgn_file)
+        try:
+            with open(pgn_path, "r", encoding="utf-8", errors="replace") as pgn_file:
+                game = chess.pgn.read_game(pgn_file)
+        except OSError as e:
+            console.print(
+                f"[bold red]Error:[/bold red] Could not read PGN input {pgn_path!r}. {e}"
+            )
+            return None, None, None, interrupted, total_plies
 
         if not game:
             console.print("[bold red]Error:[/bold red] No game found in PGN file.")
@@ -364,10 +370,6 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    pgn_path = Path(args.pgn)
-    if not pgn_path.is_file():
-        parser.error(f"PGN file not found: {args.pgn}")
 
     try:
         results, headers, evals, interrupted, total_plies = analyze_game(
