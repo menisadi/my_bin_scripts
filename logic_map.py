@@ -19,9 +19,10 @@ import inspect
 import pathlib
 import argparse
 from textwrap import shorten
+from typing import TypedDict
 from types import FunctionType, ModuleType
-from rich.console import Console
-from rich.tree import Tree
+from rich.console import Console  # pyright: ignore[reportMissingImports]
+from rich.tree import Tree  # pyright: ignore[reportMissingImports]
 
 #: base node types we want to show
 BASE_LOGICAL_NODES = (
@@ -38,6 +39,14 @@ BASE_LOGICAL_NODES = (
 
 EXIT_NODES = (ast.Return, ast.Break, ast.Continue)
 RAISE_NODES = (ast.Raise,)
+
+
+class _Opts(TypedDict):
+    """Rendering options threaded through the recursive helpers."""
+    max_depth: int
+    max_len: int
+    show_lineno: bool
+    include_calls: bool
 
 
 def _with_lineno_text(text: str, lineno: int | None, show: bool) -> str:
@@ -95,7 +104,7 @@ def _label(node: ast.AST, *, max_len: int = 60, show_lineno: bool = False) -> st
         case ast.Continue():
             return with_lineno("[red]continue[/]")
         case ast.Raise(exc=exc, cause=cause):
-            parts = []
+            parts: list[str] = []
             if exc is not None:
                 parts.append(_expr(exc, max_len))
                 if cause is not None:
@@ -131,104 +140,95 @@ def _add_stmt_list(
     branch: Tree,
     stmts: list[ast.stmt],
     nodes: tuple[type[ast.AST], ...],
+    opts: _Opts,
     *,
     depth: int,
-    max_depth: int,
-    max_len: int,
-    show_lineno: bool,
-    include_calls: bool,
 ) -> None:
-    kw = dict(max_depth=max_depth, max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
     for stmt in stmts:
         if isinstance(stmt, nodes):
             child_branch = branch.add(
-                _label(stmt, max_len=max_len, show_lineno=show_lineno)
+                _label(stmt, max_len=opts["max_len"], show_lineno=opts["show_lineno"])
             )
-            _add_children(child_branch, stmt, nodes, depth=depth + 1, **kw)
-        elif include_calls and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-            branch.add(_call_label(stmt, max_len, show_lineno))
+            _add_children(child_branch, stmt, nodes, opts, depth=depth + 1)
+        elif opts["include_calls"] and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            branch.add(_call_label(stmt, opts["max_len"], opts["show_lineno"]))
         else:
-            _add_children(branch, stmt, nodes, depth=depth, **kw)
+            _add_children(branch, stmt, nodes, opts, depth=depth)
 
 
 def _add_children(
     branch: Tree,
     node: ast.AST,
     nodes: tuple[type[ast.AST], ...],
+    opts: _Opts,
     *,
     depth: int,
-    max_depth: int,
-    max_len: int,
-    show_lineno: bool,
-    include_calls: bool,
 ) -> None:
     # Stop recursing once we've hit the depth limit
-    if max_depth and depth >= max_depth:
+    if opts["max_depth"] and depth >= opts["max_depth"]:
         return
-
-    kw = dict(depth=depth, max_depth=max_depth, max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
 
     # ── Function/class: docstring then body ────────────────────────────────
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        doc = _docstring_label(node.body, max_len)
+        doc = _docstring_label(node.body, opts["max_len"])
         if doc:
             branch.add(doc)
-        _add_stmt_list(branch, node.body, nodes, **kw)
+        _add_stmt_list(branch, node.body, nodes, opts, depth=depth)
         return
 
     # ── Special handling for 'try' so we show except/else/finally ─────────
     if isinstance(node, ast.Try):
-        _add_stmt_list(branch, node.body, nodes, **kw)
+        _add_stmt_list(branch, node.body, nodes, opts, depth=depth)
 
         for h in node.handlers:
-            exc = _expr(h.type, max_len) if h.type is not None else ""
+            exc = _expr(h.type, opts["max_len"]) if h.type is not None else ""
             name = f" as {h.name}" if getattr(h, "name", None) else ""
             label = "[magenta]except[/]" + (f" {exc}{name}" if exc or name else "")
             exc_branch = branch.add(
-                _with_lineno_text(label, getattr(h, "lineno", None), show_lineno)
+                _with_lineno_text(label, getattr(h, "lineno", None), opts["show_lineno"])
             )
-            _add_stmt_list(exc_branch, h.body, nodes, **kw)
+            _add_stmt_list(exc_branch, h.body, nodes, opts, depth=depth)
 
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, show_lineno))
-            _add_stmt_list(else_branch, node.orelse, nodes, **kw)
+            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"]))
+            _add_stmt_list(else_branch, node.orelse, nodes, opts, depth=depth)
 
         if node.finalbody:
             ln = getattr(node.finalbody[0], "lineno", None)
-            fin_branch = branch.add(_with_lineno_text("[magenta]finally[/]", ln, show_lineno))
-            _add_stmt_list(fin_branch, node.finalbody, nodes, **kw)
+            fin_branch = branch.add(_with_lineno_text("[magenta]finally[/]", ln, opts["show_lineno"]))
+            _add_stmt_list(fin_branch, node.finalbody, nodes, opts, depth=depth)
         return
 
     # ── 'if' with explicit 'else' branch ──────────────────────────────────
     if isinstance(node, ast.If):
-        _add_stmt_list(branch, node.body, nodes, **kw)
+        _add_stmt_list(branch, node.body, nodes, opts, depth=depth)
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, show_lineno))
-            _add_stmt_list(else_branch, node.orelse, nodes, **kw)
+            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"]))
+            _add_stmt_list(else_branch, node.orelse, nodes, opts, depth=depth)
         return
 
     # ── Loop 'else' (runs when loop isn't broken) ─────────────────────────
     if isinstance(node, (ast.For, ast.While)):
-        _add_stmt_list(branch, node.body, nodes, **kw)
+        _add_stmt_list(branch, node.body, nodes, opts, depth=depth)
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, show_lineno))
-            _add_stmt_list(else_branch, node.orelse, nodes, **kw)
+            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"]))
+            _add_stmt_list(else_branch, node.orelse, nodes, opts, depth=depth)
         return
 
     # ── Generic descent ────────────────────────────────────────────────────
     for child in ast.iter_child_nodes(node):
         if isinstance(child, nodes):
             child_branch = branch.add(
-                _label(child, max_len=max_len, show_lineno=show_lineno)
+                _label(child, max_len=opts["max_len"], show_lineno=opts["show_lineno"])
             )
-            _add_children(child_branch, child, nodes, depth=depth + 1, max_depth=max_depth, max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
-        elif include_calls and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
-            branch.add(_call_label(child, max_len, show_lineno))
+            _add_children(child_branch, child, nodes, opts, depth=depth + 1)
+        elif opts["include_calls"] and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
+            branch.add(_call_label(child, opts["max_len"], opts["show_lineno"]))
         else:
-            _add_children(branch, child, nodes, **kw)
+            _add_children(branch, child, nodes, opts, depth=depth)
 
 
 def _to_source(obj: str | pathlib.Path | FunctionType | ModuleType) -> tuple[str, str]:
@@ -238,9 +238,9 @@ def _to_source(obj: str | pathlib.Path | FunctionType | ModuleType) -> tuple[str
         return p.name, p.read_text(encoding="utf-8")
     if isinstance(obj, FunctionType):
         return obj.__name__, inspect.getsource(obj)
-    if isinstance(obj, ModuleType):
-        return getattr(obj, "__file__", obj.__name__), inspect.getsource(obj)
-    raise TypeError("Unsupported input")
+    # must be ModuleType
+    filename: str = getattr(obj, "__file__", None) or obj.__name__
+    return pathlib.Path(filename).name, inspect.getsource(obj)
 
 
 def show_logic_map(
@@ -261,11 +261,13 @@ def show_logic_map(
         nodes += EXIT_NODES
     if include_raises:
         nodes += RAISE_NODES
-    _add_children(
-        tree, root, nodes,
-        depth=0, max_depth=max_depth,
-        max_len=expr_width, show_lineno=show_lineno, include_calls=include_calls,
-    )
+    opts: _Opts = {
+        "max_depth": max_depth,
+        "max_len": expr_width,
+        "show_lineno": show_lineno,
+        "include_calls": include_calls,
+    }
+    _add_children(tree, root, nodes, opts, depth=0)
     Console().print(tree)
 
 
