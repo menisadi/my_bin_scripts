@@ -1,0 +1,290 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["requests"]
+# ///
+
+"""
+Fetch top N artists / tracks / albums (with playcounts) for a Last.fm user.
+
+Endpoints (methods):
+- user.getTopArtists
+- user.getTopTracks
+- user.getTopAlbums
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sys
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import requests
+
+API_ROOT = "https://ws.audioscrobbler.com/2.0/"
+
+
+@dataclass
+class LastFmError(Exception):
+    code: int
+    message: str
+
+    def __str__(self) -> str:
+        return f"Last.fm error {self.code}: {self.message}"
+
+
+def call_lastfm(
+    params: Dict[str, Any], user_agent: str, timeout: int = 30
+) -> Dict[str, Any]:
+    params = dict(params)
+    params["format"] = "json"
+
+    r = requests.get(
+        API_ROOT, params=params, headers={"User-Agent": user_agent}, timeout=timeout
+    )
+    r.raise_for_status()
+
+    data = r.json()
+    # Last.fm can return errors inside a JSON body even with HTTP 200
+    if isinstance(data, dict) and "error" in data:
+        raise LastFmError(int(data["error"]), str(data.get("message", "")))
+    return data
+
+
+def parse_items(
+    payload: Dict[str, Any], top_key: str, item_key: str
+) -> List[Dict[str, Any]]:
+    """
+    Extract list of items from Last.fm "top*" payload.
+    E.g. top_key="toptracks", item_key="track"
+    """
+    top = payload.get(top_key) or {}
+    items = top.get(item_key) or []
+    if not isinstance(items, list):
+        items = [items]
+    return items
+
+
+def get_top(
+    api_key: str,
+    user: str,
+    item_type: str,  # artists|tracks|albums
+    n: int,
+    period: str = "overall",
+    per_page: int = 200,
+    user_agent: str = "lastfm-top/1.0 (contact: you@example.com)",
+    max_retries: int = 5,
+) -> List[Dict[str, Any]]:
+    # Map type -> Last.fm method + JSON keys
+    cfg = {
+        "artists": {
+            "method": "user.gettopartists",
+            "top_key": "topartists",
+            "item_key": "artist",
+        },
+        "tracks": {
+            "method": "user.gettoptracks",
+            "top_key": "toptracks",
+            "item_key": "track",
+        },
+        "albums": {
+            "method": "user.gettopalbums",
+            "top_key": "topalbums",
+            "item_key": "album",
+        },
+    }[item_type]
+
+    per_page = max(1, min(per_page, n))
+    results: List[Dict[str, Any]] = []
+    page = 1
+    total_pages: Optional[int] = None
+
+    while len(results) < n and (total_pages is None or page <= total_pages):
+        params = {
+            "method": cfg["method"],
+            "api_key": api_key,
+            "user": user,
+            "period": period,
+            "limit": per_page,
+            "page": page,
+        }
+
+        attempt = 0
+        while True:
+            try:
+                data = call_lastfm(params, user_agent=user_agent)
+                break
+            except LastFmError as e:
+                # 29 = rate limit exceeded
+                if e.code == 29 and attempt < max_retries:
+                    time.sleep(min(2**attempt, 30))
+                    attempt += 1
+                    continue
+                raise
+            except (requests.RequestException, ValueError) as e:
+                if attempt < max_retries:
+                    time.sleep(min(2**attempt, 30))
+                    attempt += 1
+                    continue
+                raise RuntimeError(f"Request failed after retries: {e}") from e
+
+        items = parse_items(data, cfg["top_key"], cfg["item_key"])
+        top = data.get(cfg["top_key"]) or {}
+        attr = top.get("@attr") or {}
+
+        # totalPages for paging
+        try:
+            total_pages = (
+                int(attr.get("totalPages"))
+                if attr.get("totalPages") is not None
+                else total_pages
+            )
+        except (TypeError, ValueError):
+            pass
+
+        for it in items:
+            if len(results) >= n:
+                break
+
+            row: Dict[str, Any] = {
+                "rank": int(it.get("@attr", {}).get("rank", len(results) + 1)),
+                "name": it.get("name"),
+                "playcount": int(it.get("playcount", 0)),
+                "url": it.get("url"),
+                "mbid": it.get("mbid"),
+            }
+
+            # add artist info for tracks/albums
+            if item_type == "tracks":
+                artist = it.get("artist") or {}
+                row["artist"] = (
+                    artist.get("name") if isinstance(artist, dict) else artist
+                )
+            elif item_type == "albums":
+                artist = it.get("artist") or {}
+                row["artist"] = (
+                    artist.get("name") if isinstance(artist, dict) else artist
+                )
+
+            results.append(row)
+
+        if not items:
+            break
+        page += 1
+
+    return results[:n]
+
+
+def print_table(rows: List[Dict[str, Any]], item_type: str) -> None:
+    if not rows:
+        print("No results.")
+        return
+
+    headers = ["rank", "playcount", "name"]
+    if item_type in {"tracks", "albums"}:
+        headers.insert(2, "artist")  # rank, playcount, artist, name
+
+    col_widths = {h: len(h) for h in headers}
+    for r in rows:
+        for h in headers:
+            col_widths[h] = max(col_widths[h], len(str(r.get(h, ""))))
+
+    print("  ".join(h.ljust(col_widths[h]) for h in headers))
+    print("  ".join("-" * col_widths[h] for h in headers))
+    for r in rows:
+        print("  ".join(str(r.get(h, "")).ljust(col_widths[h]) for h in headers))
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description="Fetch top N Last.fm artists/tracks/albums (with playcounts)."
+    )
+    p.add_argument(
+        "--user",
+        default=os.environ.get("LASTFM_USER"),
+        help="Last.fm username (or env LASTFM_USER)",
+    )
+    p.add_argument(
+        "--api-key",
+        default=os.environ.get("LASTFM_API_KEY"),
+        help="API key (or env LASTFM_API_KEY)",
+    )
+    p.add_argument("--n", type=int, required=True, help="Number of items to return")
+    p.add_argument(
+        "--type",
+        choices=["artists", "tracks", "albums"],
+        default="artists",
+        help="Which top list to fetch",
+    )
+    p.add_argument(
+        "--period",
+        default="overall",
+        choices=["overall", "7day", "1month", "3month", "6month", "12month"],
+        help="Time period (default: overall)",
+    )
+    p.add_argument(
+        "--per-page",
+        type=int,
+        default=200,
+        help="Items per page request (default: 200)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["table", "json", "csv"],
+        default="table",
+        help="Output format",
+    )
+    p.add_argument(
+        "--user-agent",
+        default="lastfm-top/1.0 (contact: you@example.com)",
+        help="Identifiable User-Agent (recommended)",
+    )
+    args = p.parse_args()
+
+    if not args.api_key:
+        print(
+            "Missing API key. Provide --api-key or set LASTFM_API_KEY.", file=sys.stderr
+        )
+        return 2
+    if not args.user:
+        print("Missing user. Provide --user or set LASTFM_USER.", file=sys.stderr)
+        return 2
+    if args.n <= 0:
+        print("--n must be > 0", file=sys.stderr)
+        return 2
+
+    rows = get_top(
+        api_key=args.api_key,
+        user=args.user,
+        item_type=args.type,
+        n=args.n,
+        period=args.period,
+        per_page=args.per_page,
+        user_agent=args.user_agent,
+    )
+
+    if args.output == "json":
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+    elif args.output == "csv":
+        # include artist column for tracks/albums if present
+        fieldnames = ["rank", "playcount"]
+        if args.type in {"tracks", "albums"}:
+            fieldnames += ["artist"]
+        fieldnames += ["name", "url", "mbid"]
+
+        w = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    else:
+        print_table(rows, args.type)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+# vim: ft=python
