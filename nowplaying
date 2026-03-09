@@ -18,3 +18,4 @@ ICON="▸ "
 echo -e "${BOLD}${COLOR}Title :${RESET} $title"
 echo -e "${BOLD}${COLOR}Artist:${RESET} $artist"
 echo -e "${BOLD}${COLOR}Album :${RESET} $album"
+# vim: ft=sh

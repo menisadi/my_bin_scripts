@@ -68,3 +68,4 @@ case "${choice:-x}" in
     echo "Cancelled."
     ;;
 esac
+# vim: ft=sh

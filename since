@@ -65,3 +65,4 @@ if [[ "$sign" == "-" ]]; then
 else
   printf "%d days, %d hours, %d minutes ago\n" "$days" "$hours" "$minutes"
 fi
+# vim: ft=sh

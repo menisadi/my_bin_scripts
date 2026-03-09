@@ -68,3 +68,4 @@ if command -v uv >/dev/null 2>&1; then
 else
   python3 ~/bin/pomo.py "$minutes" -w $(( $(tput cols) * 80 / 100 ))
 fi
+# vim: ft=sh

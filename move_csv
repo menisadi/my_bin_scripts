@@ -19,3 +19,4 @@ fi
 
 # Move the file to ~/code/work/data with the new name
 mv "$last_csv" ~/code/work/data/"$new_name"
+# vim: ft=zsh

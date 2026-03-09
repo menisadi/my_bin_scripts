@@ -21,3 +21,4 @@ def tree(dir_path, prefix=''):
 
 print('.')
 tree('.')
+# vim: ft=python

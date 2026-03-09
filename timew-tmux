@@ -18,3 +18,4 @@ s=${BASH_REMATCH[4]%S}; s=${s:-0}
 mins=$(( h*60 + m + (s+30)/60 ))      # round secs ≥30 up
 
 printf '%s %dm\n' "$tag" "$mins"
+# vim: ft=sh

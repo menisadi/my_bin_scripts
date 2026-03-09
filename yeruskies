@@ -93,3 +93,4 @@ printf "%s%s%s\n" "${BOLD}${BR_GREEN}" "$line3" "$RESET"
 
 printf "%s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n" "$BR_BLACK" "" "$RESET"
 printf "%s%sData:%s wttr.in  %s(format=j1)%s\n" "$DIM" "$BR_BLACK" "$RESET" "$BR_BLACK" "$RESET"
+# vim: ft=sh

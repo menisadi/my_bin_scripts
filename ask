@@ -14,3 +14,4 @@ PROMPT="Based on the following request, provide a single, executable bash comman
 
 # Call the ollama CLI to get the command
 ollama run qwen2.5-coder:1.5b "${PROMPT}"
+# vim: ft=sh

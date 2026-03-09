@@ -36,3 +36,4 @@ for line in log:
 # if the very last block was folded, close it
 if skipped:
     print(f"{prev_prefix}…")
+# vim: ft=python
