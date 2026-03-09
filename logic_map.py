@@ -268,7 +268,7 @@ def show_logic_map(
         "include_calls": include_calls,
     }
     _add_children(tree, root, nodes, opts, depth=0)
-    Console().print(tree)
+    Console(force_terminal=True).print(tree)
 
 
 # --- CLI -------
