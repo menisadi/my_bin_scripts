@@ -132,26 +132,23 @@ def _add_stmt_list(
     stmts: list[ast.stmt],
     nodes: tuple[type[ast.AST], ...],
     *,
+    depth: int,
+    max_depth: int,
     max_len: int,
     show_lineno: bool,
     include_calls: bool,
 ) -> None:
+    kw = dict(max_depth=max_depth, max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
     for stmt in stmts:
         if isinstance(stmt, nodes):
             child_branch = branch.add(
                 _label(stmt, max_len=max_len, show_lineno=show_lineno)
             )
-            _add_children(
-                child_branch, stmt, nodes,
-                max_len=max_len, show_lineno=show_lineno, include_calls=include_calls,
-            )
+            _add_children(child_branch, stmt, nodes, depth=depth + 1, **kw)
         elif include_calls and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
             branch.add(_call_label(stmt, max_len, show_lineno))
         else:
-            _add_children(
-                branch, stmt, nodes,
-                max_len=max_len, show_lineno=show_lineno, include_calls=include_calls,
-            )
+            _add_children(branch, stmt, nodes, depth=depth, **kw)
 
 
 def _add_children(
@@ -159,11 +156,17 @@ def _add_children(
     node: ast.AST,
     nodes: tuple[type[ast.AST], ...],
     *,
+    depth: int,
+    max_depth: int,
     max_len: int,
     show_lineno: bool,
     include_calls: bool,
 ) -> None:
-    kw = dict(max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
+    # Stop recursing once we've hit the depth limit
+    if max_depth and depth >= max_depth:
+        return
+
+    kw = dict(depth=depth, max_depth=max_depth, max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
 
     # ── Function/class: docstring then body ────────────────────────────────
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -221,7 +224,7 @@ def _add_children(
             child_branch = branch.add(
                 _label(child, max_len=max_len, show_lineno=show_lineno)
             )
-            _add_children(child_branch, child, nodes, **kw)
+            _add_children(child_branch, child, nodes, depth=depth + 1, max_depth=max_depth, max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
         elif include_calls and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
             branch.add(_call_label(child, max_len, show_lineno))
         else:
@@ -248,7 +251,7 @@ def show_logic_map(
     include_calls: bool = False,
     show_lineno: bool = False,
     expr_width: int = 60,
-    use_pager: bool = False,
+    max_depth: int = 0,
 ) -> None:
     name, source = _to_source(target)
     root = ast.parse(source, filename=name)
@@ -260,14 +263,10 @@ def show_logic_map(
         nodes += RAISE_NODES
     _add_children(
         tree, root, nodes,
+        depth=0, max_depth=max_depth,
         max_len=expr_width, show_lineno=show_lineno, include_calls=include_calls,
     )
-    console = Console(force_terminal=use_pager)
-    if use_pager:
-        with console.pager(styles=True):
-            console.print(tree)
-    else:
-        console.print(tree)
+    Console().print(tree)
 
 
 # --- CLI -------
@@ -295,7 +294,8 @@ if __name__ == "__main__":
         help="truncate expressions to this width (default: 60)",
     )
     parser.add_argument(
-        "-p", "--pager", action="store_true", help="view in a pager (keeps ANSI colors)"
+        "-d", "--depth", type=int, default=0, metavar="N",
+        help="limit tree to N levels deep (0 = unlimited)",
     )
     args = parser.parse_args()
     show_logic_map(
@@ -305,5 +305,5 @@ if __name__ == "__main__":
         include_calls=args.calls,
         show_lineno=args.lineno,
         expr_width=args.max_expr_len,
-        use_pager=args.pager,
+        max_depth=args.depth,
     )
