@@ -10,6 +10,7 @@ logic_map_tui.py – interactive, foldable AST viewer
 from __future__ import annotations
 
 import ast
+import argparse
 import inspect
 import pathlib
 import sys
@@ -17,11 +18,10 @@ from textwrap import shorten
 from types import FunctionType, ModuleType
 
 from textual.app import App, ComposeResult
-from textual.widgets import Tree, Header, Footer  # ← modern import path
+from textual.widgets import Tree, Header, Footer
 from textual.widgets.tree import TreeNode
 from rich.text import Text
 
-# ── helpers ──────────────────────────────────────────────────────────────
 # Build LOGICAL_NODES dynamically so the code also works on Python < 3.10,
 # whose `ast` module has no Match node.
 LOGICAL_NODES: tuple[type[ast.AST], ...] = (
@@ -76,27 +76,43 @@ def _label(node: ast.AST) -> Text:
     if isinstance(node, ast.Try):
         return Text("try", style="magenta")
 
-    # `ast.Match` only exists on Python ≥ 3.10
     if hasattr(ast, "Match") and isinstance(node, ast.Match):  # type: ignore[attr-defined]
         return Text.assemble(("match ", "magenta"), _expr(node.subject))
 
     return Text(type(node).__name__)
 
 
-def _populate(tree_node: TreeNode, ast_node: ast.AST) -> None:
+def _populate(tree_node: TreeNode, ast_node: ast.AST, *, show_calls: bool) -> None:
     """Recursively add logical AST nodes as children of *tree_node*."""
     for child in ast.iter_child_nodes(ast_node):
         if isinstance(child, LOGICAL_NODES):
-            child_node = tree_node.add(_label(child))
-            _populate(child_node, child)
+            child_node = tree_node.add(_label(child), expand=True)
+
+            # Docstring: first statement is a bare string literal
+            body = getattr(child, "body", None)
+            if body:
+                first = body[0]
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    first_line = first.value.value.strip().split("\n")[0]
+                    child_node.add_leaf(
+                        Text(shorten(first_line, width=60, placeholder=" …"), style="dim italic")
+                    )
+
+            _populate(child_node, child, show_calls=show_calls)
+
+        elif show_calls and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
+            tree_node.add_leaf(Text.assemble(("→ ", "blue"), _expr(child.value)))
+
+        else:
+            _populate(tree_node, child, show_calls=show_calls)
 
 
 def _to_source(obj) -> tuple[str, str]:
-    """Return (display_name, source_code) for a file / function / module.
-
-    The first element is used as the *filename* for ast.parse, so it **must**
-    be a str or os.PathLike – never None.
-    """
+    """Return (display_name, source_code) for a file / function / module."""
     if isinstance(obj, (str, pathlib.Path)):
         p = pathlib.Path(obj)
         return p.name, p.read_text(encoding="utf-8")
@@ -105,9 +121,6 @@ def _to_source(obj) -> tuple[str, str]:
         return obj.__name__, inspect.getsource(obj)
 
     if isinstance(obj, ModuleType):
-        # __file__ may legitimately be None (built-ins, REPL code, etc.).
-        # Fall back to the module’s qualified name so that `ast.parse`
-        # always gets a real filename string.
         filename = getattr(obj, "__file__", None) or obj.__name__
         return pathlib.Path(filename).name, inspect.getsource(obj)
 
@@ -125,31 +138,35 @@ class LogicMapApp(App):
 
     BINDINGS = [("q", "quit", "Quit")]
 
-    def __init__(self, target):
+    def __init__(self, target, *, show_calls: bool = True):
         self._name, self._source = _to_source(target)
+        self._show_calls = show_calls
         super().__init__()
 
-    def compose(self) -> ComposeResult:  # noqa: D401 (simple verb is fine here)
+    def compose(self) -> ComposeResult:
         yield Header()
 
         tree = Tree(f"[bold bright_blue]{self._name}")
         _populate(
             tree.root,
             ast.parse(self._source, filename=self._name or "<input>"),
+            show_calls=self._show_calls,
         )
-        # In modern Textual the Tree already handles its own scrolling;
-        # just yield it.  If you prefer an explicit scroll container:
-        #   scroll = ScrollView()
-        #   scroll.mount(tree)
-        #   yield scroll
         yield tree
         yield Footer()
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit("Usage: python logic_map_tui.py path/to/file.py")
-    LogicMapApp(sys.argv[1]).run()
+    parser = argparse.ArgumentParser(
+        description="Interactive, foldable AST viewer."
+    )
+    parser.add_argument("path", help="path to a Python file")
+    parser.add_argument(
+        "--no-calls", dest="calls", action="store_false",
+        help="hide statement-level function calls (shown by default)",
+    )
+    args = parser.parse_args()
+    LogicMapApp(args.path, show_calls=args.calls).run()
 
 
 if __name__ == "__main__":

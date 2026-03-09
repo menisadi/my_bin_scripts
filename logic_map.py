@@ -18,7 +18,7 @@ import ast
 import inspect
 import pathlib
 import argparse
-from textwrap import shorten  #  ← new
+from textwrap import shorten
 from types import FunctionType, ModuleType
 from rich.console import Console
 from rich.tree import Tree
@@ -44,37 +44,15 @@ def _with_lineno_text(text: str, lineno: int | None, show: bool) -> str:
     return f"{text} [dim](L{lineno})[/]" if show and lineno is not None else text
 
 
-def _add_stmt_list(
-    branch: Tree,
-    stmts: list[ast.stmt],
-    nodes: tuple[type[ast.AST], ...],
-    *,
-    max_len: int,
-    show_lineno: bool,
-) -> None:
-    for stmt in stmts:
-        if isinstance(stmt, nodes):
-            child_branch = branch.add(
-                _label(stmt, max_len=max_len, show_lineno=show_lineno)
-            )
-            _add_children(
-                child_branch, stmt, nodes, max_len=max_len, show_lineno=show_lineno
-            )
-        else:
-            _add_children(branch, stmt, nodes, max_len=max_len, show_lineno=show_lineno)
-
-
 def _expr(node: ast.AST, max_len: int = 60) -> str:
     """Return source for *node*, truncated nicely."""
     try:
         code = ast.unparse(node)  # Py ≥ 3.9
     except AttributeError:  # Py ≤ 3.8
         code = ast.dump(node, include_attributes=False)
-    # collapse new-lines and over-long expressions
     return shorten(code.replace("\n", " "), width=max_len, placeholder=" … ")
 
 
-#: quick palette
 def _label(node: ast.AST, *, max_len: int = 60, show_lineno: bool = False) -> str:
     def with_lineno(text: str) -> str:
         if show_lineno and hasattr(node, "lineno"):
@@ -90,7 +68,7 @@ def _label(node: ast.AST, *, max_len: int = 60, show_lineno: bool = False) -> st
         case ast.AsyncFunctionDef(name=name):
             return with_lineno(f"[green]async def[/] [bold]{name}()")
 
-        # ── flow control, now with full conditions ─────────────────────────
+        # ── flow control ───────────────────────────────────────────────────
         case ast.If(test=test):
             return with_lineno(f"[magenta]if[/] {_expr(test, max_len)}")
         case ast.For(target=target, iter=iter_):
@@ -117,7 +95,6 @@ def _label(node: ast.AST, *, max_len: int = 60, show_lineno: bool = False) -> st
         case ast.Continue():
             return with_lineno("[red]continue[/]")
         case ast.Raise(exc=exc, cause=cause):
-            # "raise" or "raise exc" or "raise exc from cause"
             parts = []
             if exc is not None:
                 parts.append(_expr(exc, max_len))
@@ -129,6 +106,54 @@ def _label(node: ast.AST, *, max_len: int = 60, show_lineno: bool = False) -> st
             return with_lineno(type(node).__name__)
 
 
+def _docstring_label(body: list[ast.stmt], max_len: int) -> str | None:
+    """Return a dimmed label for the docstring if the body starts with one."""
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        first_line = body[0].value.value.strip().split("\n")[0]
+        return f"[dim italic]{shorten(first_line, width=max_len, placeholder=' …')}[/]"
+    return None
+
+
+def _call_label(stmt: ast.Expr, max_len: int, show_lineno: bool) -> str:
+    """Return a label for a statement-level call expression."""
+    text = f"[blue]→[/] {_expr(stmt.value, max_len)}"
+    if show_lineno and hasattr(stmt, "lineno"):
+        text += f" [dim](L{stmt.lineno})[/]"
+    return text
+
+
+def _add_stmt_list(
+    branch: Tree,
+    stmts: list[ast.stmt],
+    nodes: tuple[type[ast.AST], ...],
+    *,
+    max_len: int,
+    show_lineno: bool,
+    include_calls: bool,
+) -> None:
+    for stmt in stmts:
+        if isinstance(stmt, nodes):
+            child_branch = branch.add(
+                _label(stmt, max_len=max_len, show_lineno=show_lineno)
+            )
+            _add_children(
+                child_branch, stmt, nodes,
+                max_len=max_len, show_lineno=show_lineno, include_calls=include_calls,
+            )
+        elif include_calls and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            branch.add(_call_label(stmt, max_len, show_lineno))
+        else:
+            _add_children(
+                branch, stmt, nodes,
+                max_len=max_len, show_lineno=show_lineno, include_calls=include_calls,
+            )
+
+
 def _add_children(
     branch: Tree,
     node: ast.AST,
@@ -136,15 +161,22 @@ def _add_children(
     *,
     max_len: int,
     show_lineno: bool,
+    include_calls: bool,
 ) -> None:
+    kw = dict(max_len=max_len, show_lineno=show_lineno, include_calls=include_calls)
+
+    # ── Function/class: docstring then body ────────────────────────────────
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        doc = _docstring_label(node.body, max_len)
+        if doc:
+            branch.add(doc)
+        _add_stmt_list(branch, node.body, nodes, **kw)
+        return
+
     # ── Special handling for 'try' so we show except/else/finally ─────────
     if isinstance(node, ast.Try):
-        # Body under the existing "try" label
-        _add_stmt_list(
-            branch, node.body, nodes, max_len=max_len, show_lineno=show_lineno
-        )
+        _add_stmt_list(branch, node.body, nodes, **kw)
 
-        # Each 'except' block as its own labeled branch
         for h in node.handlers:
             exc = _expr(h.type, max_len) if h.type is not None else ""
             name = f" as {h.name}" if getattr(h, "name", None) else ""
@@ -152,95 +184,48 @@ def _add_children(
             exc_branch = branch.add(
                 _with_lineno_text(label, getattr(h, "lineno", None), show_lineno)
             )
-            _add_stmt_list(
-                exc_branch, h.body, nodes, max_len=max_len, show_lineno=show_lineno
-            )
+            _add_stmt_list(exc_branch, h.body, nodes, **kw)
 
-        # Optional 'else'
-        if node.orelse:
-            # best-effort line number: the first stmt in else, if any
-            ln = getattr(node.orelse[0], "lineno", None) if node.orelse else None
-            else_branch = branch.add(
-                _with_lineno_text("[magenta]else[/]", ln, show_lineno)
-            )
-            _add_stmt_list(
-                else_branch,
-                node.orelse,
-                nodes,
-                max_len=max_len,
-                show_lineno=show_lineno,
-            )
-
-        # Optional 'finally'
-        if node.finalbody:
-            ln = getattr(node.finalbody[0], "lineno", None) if node.finalbody else None
-            fin_branch = branch.add(
-                _with_lineno_text("[magenta]finally[/]", ln, show_lineno)
-            )
-            _add_stmt_list(
-                fin_branch,
-                node.finalbody,
-                nodes,
-                max_len=max_len,
-                show_lineno=show_lineno,
-            )
-        return
-
-    # ── 'if' with explicit 'else' branch (keeps 'then' implicit) ──────────
-    if isinstance(node, ast.If):
-        _add_stmt_list(
-            branch, node.body, nodes, max_len=max_len, show_lineno=show_lineno
-        )
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(
-                _with_lineno_text(
-                    "[magenta]else//[/]".replace("//", ""), ln, show_lineno
-                )
-            )  # "[magenta]else[/]"
-            _add_stmt_list(
-                else_branch,
-                node.orelse,
-                nodes,
-                max_len=max_len,
-                show_lineno=show_lineno,
-            )
+            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, show_lineno))
+            _add_stmt_list(else_branch, node.orelse, nodes, **kw)
+
+        if node.finalbody:
+            ln = getattr(node.finalbody[0], "lineno", None)
+            fin_branch = branch.add(_with_lineno_text("[magenta]finally[/]", ln, show_lineno))
+            _add_stmt_list(fin_branch, node.finalbody, nodes, **kw)
+        return
+
+    # ── 'if' with explicit 'else' branch ──────────────────────────────────
+    if isinstance(node, ast.If):
+        _add_stmt_list(branch, node.body, nodes, **kw)
+        if node.orelse:
+            ln = getattr(node.orelse[0], "lineno", None)
+            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, show_lineno))
+            _add_stmt_list(else_branch, node.orelse, nodes, **kw)
         return
 
     # ── Loop 'else' (runs when loop isn't broken) ─────────────────────────
     if isinstance(node, (ast.For, ast.While)):
-        # Loop body
-        # (Note: the loop node itself already has a label in the tree)
-        _add_stmt_list(
-            branch, node.body, nodes, max_len=max_len, show_lineno=show_lineno
-        )
+        _add_stmt_list(branch, node.body, nodes, **kw)
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(
-                _with_lineno_text("[magenta]else[/]", ln, show_lineno)
-            )
-            _add_stmt_list(
-                else_branch,
-                node.orelse,
-                nodes,
-                max_len=max_len,
-                show_lineno=show_lineno,
-            )
+            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, show_lineno))
+            _add_stmt_list(else_branch, node.orelse, nodes, **kw)
         return
 
-    # ── Generic descent (unchanged behavior) ──────────────────────────────
+    # ── Generic descent ────────────────────────────────────────────────────
     for child in ast.iter_child_nodes(node):
         if isinstance(child, nodes):
             child_branch = branch.add(
                 _label(child, max_len=max_len, show_lineno=show_lineno)
             )
-            _add_children(
-                child_branch, child, nodes, max_len=max_len, show_lineno=show_lineno
-            )
+            _add_children(child_branch, child, nodes, **kw)
+        elif include_calls and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
+            branch.add(_call_label(child, max_len, show_lineno))
         else:
-            _add_children(
-                branch, child, nodes, max_len=max_len, show_lineno=show_lineno
-            )
+            _add_children(branch, child, nodes, **kw)
 
 
 def _to_source(obj: str | pathlib.Path | FunctionType | ModuleType) -> tuple[str, str]:
@@ -260,6 +245,7 @@ def show_logic_map(
     *,
     include_exits: bool = False,
     include_raises: bool = False,
+    include_calls: bool = False,
     show_lineno: bool = False,
     expr_width: int = 60,
     use_pager: bool = False,
@@ -272,10 +258,12 @@ def show_logic_map(
         nodes += EXIT_NODES
     if include_raises:
         nodes += RAISE_NODES
-    _add_children(tree, root, nodes, max_len=expr_width, show_lineno=show_lineno)
+    _add_children(
+        tree, root, nodes,
+        max_len=expr_width, show_lineno=show_lineno, include_calls=include_calls,
+    )
     console = Console(force_terminal=use_pager)
     if use_pager:
-        # Keep styles and send to system pager (defaults to: less -R)
         with console.pager(styles=True):
             console.print(tree)
     else:
@@ -289,22 +277,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("path", help="path to a Python file")
     parser.add_argument(
-        "-x",
-        "--exits",
-        action="store_true",
+        "-x", "--exits", action="store_true",
         help="include exit points: return/break/continue",
     )
     parser.add_argument(
         "-R", "--raises", action="store_true", help="include raise statements"
     )
     parser.add_argument(
+        "-c", "--calls", action="store_true",
+        help="include statement-level function calls (shown as → call)",
+    )
+    parser.add_argument(
         "-n", "--lineno", action="store_true", help="append line numbers like (L42)"
     )
     parser.add_argument(
-        "-m",
-        "--max-expr-len",
-        type=int,
-        default=60,
+        "-m", "--max-expr-len", type=int, default=60,
         help="truncate expressions to this width (default: 60)",
     )
     parser.add_argument(
@@ -315,6 +302,7 @@ if __name__ == "__main__":
         args.path,
         include_exits=args.exits,
         include_raises=args.raises,
+        include_calls=args.calls,
         show_lineno=args.lineno,
         expr_width=args.max_expr_len,
         use_pager=args.pager,
