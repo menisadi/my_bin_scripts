@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Convert .wav files to VBR MP3 (~ 192 kbps)
+
+for file in "$@"; do
+  [ -f "$file" ] || { printf '✗ %s: not found\n' "$file"; continue; }
+  ffmpeg -i "$file" \
+         -codec:a libmp3lame \
+         -q:a 2 \
+         "${file%.*}.mp3"
+done

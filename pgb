@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Ping bar — visual latency monitor
+
+host="${1:-google.com}"
+interval="${2:-1}"
+
+# ANSI colors
+G="\033[32m"       # < 50 ms
+Y="\033[33m"       # < 100 ms
+O="\033[38;5;208m" # < 200 ms
+R="\033[31m"       # >= 200 ms
+L="\033[90m"       # loss / timeout (gray)
+RESET="\033[0m"
+
+ping -i "$interval" "$host" 2>/dev/null |
+  awk -v G="$G" -v Y="$Y" -v O="$O" -v R="$R" -v L="$L" -v RESET="$RESET" '
+  BEGIN { ok="█"; loss="░"; }
+  /bytes from/ {
+    # Match "time=12.3 ms" or "time<12.3 ms"
+    t=-1
+    if ($0 ~ /time=/ || $0 ~ /time</) {
+      n=split($0, parts, "time[=<]")
+      if (n > 1) {
+        sub(/ ms.*/, "", parts[2])
+        t = parts[2] + 0
+      }
+    }
+    if (t >= 0) {
+      if (t < 50)      printf G ok RESET;
+      else if (t < 100) printf Y ok RESET;
+      else if (t < 200) printf O ok RESET;
+      else               printf R ok RESET;
+      fflush();
+    }
+    next
+  }
+  /Request timeout|unreachable|Time to live exceeded|packet loss/ {
+    printf L loss RESET; fflush(); next
+  }
+'

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Find large files in a directory tree
+
+path=""
+threshold=""
+exclude=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--path)
+      shift
+      path="$1"
+      ;;
+    -t|--threshold)
+      shift
+      threshold="$1"
+      ;;
+    -e|--exclude)
+      shift
+      exclude="$1"
+      ;;
+    -h|--help)
+      echo ""
+      echo "code2heavy - Find large files in a directory tree"
+      echo ""
+      echo "Usage:"
+      echo "  code2heavy -p <path> -t <size> [-e <dir>]"
+      echo ""
+      echo "Options:"
+      echo "  -p, --path <path>         Directory to search (required)"
+      echo "  -t, --threshold <size>    Minimum file size in megabytes (required)"
+      echo "  -e, --exclude <dir>       Exclude directory by name (optional)"
+      echo "  -h, --help                Show this help message and exit"
+      echo ""
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$path" ]]; then
+  echo "Please provide a valid path using --path or -p option."
+  exit 1
+fi
+
+if [[ -z "$threshold" ]]; then
+  echo "Please provide a valid threshold using --threshold or -t option."
+  exit 1
+fi
+
+if [[ -z "$exclude" ]]; then
+  /usr/bin/find "$path" -type f -size +"$threshold"M
+else
+  /usr/bin/find "$path" -type d -name "$exclude" -prune -o -type f -size +"$threshold"M
+fi

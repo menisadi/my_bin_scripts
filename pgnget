@@ -1,0 +1,24 @@
+#!/usr/bin/env zsh
+# Extract the Nth game from a PGN file
+
+local n="$1"
+local file="$2"
+
+if [[ -z "$n" || -z "$file" ]]; then
+  print -u2 "Usage: pgnget <game_number> <pgn_file>"
+  exit 2
+fi
+if [[ ! -f "$file" ]]; then
+  print -u2 "pgnget: file not found: $file"
+  exit 2
+fi
+if [[ "$n" != <-> || "$n" -le 0 ]]; then
+  print -u2 "pgnget: game_number must be a positive integer"
+  exit 2
+fi
+
+awk -v n="$n" '
+  /^\[Event / {g++}
+  g==n {print}
+  g>n {exit}
+' "$file"
