@@ -1,0 +1,23 @@
+#!/usr/bin/env zsh
+# webread - robustly extract a web page as markdown
+# Usage: webread <url>
+
+set -euo pipefail
+
+url="${1:?Usage: webread <url>}"
+
+# Try trafilatura directly first (|| true: may exit non-zero on blocked URLs)
+content=$(trafilatura --markdown -u "$url" 2>/dev/null || true)
+
+# Fallback: fetch with browser user-agent, then pipe to trafilatura
+if [[ -z "$content" ]]; then
+  html=$(curl -sL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" "$url")
+  content=$(echo "$html" | trafilatura --markdown 2>/dev/null || true)
+fi
+
+if [[ -n "$content" ]]; then
+  echo "$content"
+else
+  echo "Could not extract content from: $url" >&2
+  exit 1
+fi
