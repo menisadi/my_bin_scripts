@@ -1,0 +1,345 @@
+# /// script
+# dependencies = ["typer", "rich"]
+# ///
+"""Check if you've listened to an artist's full discography on Last.fm.
+
+Usage:
+    uv run discography_check.py "Caroline Polachek" "Chairlift" "Ramona Lisa" "CEP"
+    uv run discography_check.py --albums-only "Caroline Polachek"
+
+Requires env vars: LASTFM_API_KEY, LASTFM_USERNAME
+"""
+
+import os
+import re
+import json
+import urllib.request
+import urllib.parse
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+
+app = typer.Typer(help="Check your Last.fm discography coverage for an artist.")
+console = Console()
+
+API_KEY = os.environ["LASTFM_API_KEY"]
+USERNAME = os.environ["LASTFM_USERNAME"]
+BASE_URL = "https://ws.audioscrobbler.com/2.0/"
+
+
+def lastfm_request(method: str, **params) -> dict:
+    params.update({"method": method, "api_key": API_KEY, "format": "json"})
+    url = BASE_URL + "?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def get_artist_info(artist: str) -> dict:
+    data = lastfm_request("artist.getinfo", artist=artist, username=USERNAME)
+    info = data.get("artist", {})
+    stats = info.get("stats", {})
+    return {
+        "name": info.get("name", artist),
+        "user_playcount": int(stats.get("userplaycount", 0)),
+        "global_listeners": int(stats.get("listeners", 0)),
+    }
+
+
+def get_artist_albums(artist: str) -> list[dict]:
+    albums = []
+    page = 1
+    while True:
+        data = lastfm_request("artist.gettopalbums", artist=artist, limit=50, page=page)
+        top = data.get("topalbums", {})
+        batch = top.get("album", [])
+        if not batch:
+            break
+        for a in batch:
+            albums.append({"name": a["name"], "global_playcount": int(a.get("playcount", 0))})
+        total_pages = int(top.get("@attr", {}).get("totalPages", 1))
+        if page >= total_pages:
+            break
+        page += 1
+    return albums
+
+
+def get_user_album_info(artist: str, album: str) -> dict:
+    data = lastfm_request("album.getinfo", artist=artist, album=album, username=USERNAME)
+    if "error" in data:
+        raise ValueError(f"API error {data['error']}: {data.get('message', '')}")
+    album_data = data.get("album", {})
+    tracks = album_data.get("tracks", {})
+    if isinstance(tracks, dict):
+        tracks = tracks.get("track", [])
+    if isinstance(tracks, dict):
+        tracks = [tracks]
+    track_details = []
+    for t in tracks:
+        track_details.append({
+            "name": t.get("name", ""),
+            "user_playcount": int(t.get("userplaycount", 0)) if "userplaycount" in t else 0,
+        })
+    tracks_heard = sum(1 for t in track_details if t["user_playcount"] > 0)
+    return {
+        "name": album_data.get("name", album),
+        "user_playcount": int(album_data.get("userplaycount", 0)),
+        "total_tracks": len(track_details),
+        "tracks_heard": tracks_heard,
+        "tracks": track_details,
+    }
+
+
+def normalize_album_name(name: str) -> str:
+    norm = name
+    for suffix in [
+        " - EP", " - Single", " (EP)", " (Single)", " [EP]",
+        " [Explicit]", " (Explicit)", " [Deluxe]", " (Deluxe)",
+        " (Bonus Track Edition)", " [Bonus Tracks]",
+        " (Reissue)", " (2009 Re-issue)", " (2009 Re-",
+    ]:
+        if norm.lower().endswith(suffix.lower()):
+            norm = norm[: -len(suffix)]
+    return re.sub(r"\s+", " ", norm).strip()
+
+
+def matches_exclude(name: str, exclude: list[str]) -> bool:
+    lower = name.lower()
+    return any(word in lower for word in exclude)
+
+
+def deduplicate_albums(albums: list[dict]) -> list[dict]:
+    seen = {}
+    for a in albums:
+        norm = normalize_album_name(a["name"]).lower()
+        if norm not in seen or a["global_playcount"] > seen[norm]["global_playcount"]:
+            seen[norm] = a
+    return list(seen.values())
+
+
+def check_artist(artist: str, progress: Progress, task_id, exclude: list[str] | None = None) -> dict:
+    info = get_artist_info(artist)
+    all_albums = get_artist_albums(artist)
+
+    real_albums = [a for a in all_albums if not matches_exclude(a["name"], exclude)] if exclude else all_albums
+    real_albums = deduplicate_albums(real_albums)
+
+    if real_albums:
+        max_pc = max(a["global_playcount"] for a in real_albums)
+        threshold = max(1000, int(max_pc * 0.001))
+        real_albums = [a for a in real_albums if a["global_playcount"] >= threshold]
+
+    progress.update(task_id, total=len(real_albums), completed=0)
+    results = []
+    for i, album in enumerate(real_albums):
+        try:
+            album_info = get_user_album_info(artist, album["name"])
+            results.append({
+                "album": album_info["name"],
+                "user_playcount": album_info["user_playcount"],
+                "total_tracks": album_info["total_tracks"],
+                "tracks_heard": album_info["tracks_heard"],
+                "tracks": album_info["tracks"],
+                "global_playcount": album["global_playcount"],
+            })
+        except Exception as e:
+            console.print(f"  [dim]Warning: failed to fetch '{album['name']}': {e}[/dim]", stderr=True)
+            results.append({
+                "album": album["name"],
+                "user_playcount": 0,
+                "total_tracks": "?",
+                "tracks_heard": 0,
+                "tracks": [],
+                "global_playcount": album["global_playcount"],
+            })
+        progress.update(task_id, completed=i + 1)
+
+    return {
+        "artist": info["name"],
+        "user_total_scrobbles": info["user_playcount"],
+        "albums": sorted(results, key=lambda x: -x["global_playcount"]),
+    }
+
+
+def filter_albums_only(albums: list[dict]) -> list[dict]:
+    return [a for a in albums if isinstance(a["total_tracks"], int) and a["total_tracks"] >= 4]
+
+
+def album_status(a: dict) -> str:
+    """Return status label for an album: Y (full), P (partial), N (unheard).
+
+    Uses tracks_heard if available (per-track userplaycount from API).
+    Falls back to comparing total scrobbles vs track count as a heuristic:
+    if you've scrobbled fewer times than there are tracks, you likely haven't
+    heard them all.
+    """
+    if a["user_playcount"] == 0:
+        return "N"
+    total = a["total_tracks"]
+    heard = a["tracks_heard"]
+    if isinstance(total, int) and total > 0:
+        # If per-track data is available, use it
+        if heard > 0 and heard < total:
+            return "P"
+        # If per-track data isn't populated, fall back to scrobble count heuristic
+        if heard == 0 and a["user_playcount"] < total:
+            return "P"
+    return "Y"
+
+
+def sort_albums(albums: list[dict], sort_by: str) -> list[dict]:
+    sort_keys = {
+        "popularity": lambda x: -x["global_playcount"],
+        "status": lambda x: {"N": 2, "P": 1, "Y": 0}[album_status(x)],
+        "tracks": lambda x: -(x["total_tracks"] if isinstance(x["total_tracks"], int) else 0),
+        "plays": lambda x: -x["user_playcount"],
+        "name": lambda x: x["album"].lower(),
+    }
+    return sorted(albums, key=sort_keys.get(sort_by, sort_keys["popularity"]))
+
+
+def print_report(results: list[dict], albums_only: bool = False, show_summary: bool = True,
+                 status_filter: list[str] | None = None, sort_by: str = "popularity"):
+    for r in results:
+        albums = filter_albums_only(r["albums"]) if albums_only else r["albums"]
+        if status_filter:
+            albums = [a for a in albums if album_status(a) in status_filter]
+        albums = sort_albums(albums, sort_by)
+
+        table = Table(
+            title=f"{r['artist']}  [dim]({r['user_total_scrobbles']} scrobbles)[/dim]",
+            title_style="bold",
+            show_lines=False,
+            padding=(0, 1),
+        )
+        table.add_column("", width=3, justify="center")
+        table.add_column("Album", min_width=20)
+        table.add_column("Tracks", justify="right", width=8)
+        table.add_column("Plays", justify="right", width=6)
+
+        for a in albums:
+            status = album_status(a)
+            total = a["total_tracks"]
+            heard = a["tracks_heard"]
+
+            status_colors = {"Y": "green", "P": "yellow", "N": "red"}
+            color = status_colors[status]
+
+            if status == "N":
+                tracks_str = f"[dim]{total}[/dim]"
+                plays_str = "[dim]-[/dim]"
+                album_str = f"[dim]{a['album']}[/dim]"
+            elif status == "P":
+                if heard > 0:
+                    tracks_str = f"[yellow]{heard}/{total}[/yellow]"
+                else:
+                    tracks_str = f"[yellow]{a['user_playcount']}/{total}[/yellow]"
+                plays_str = f"[yellow]{a['user_playcount']}[/yellow]"
+                album_str = a["album"]
+            else:
+                tracks_str = f"[green]{total}/{total}[/green]"
+                plays_str = f"[green]{a['user_playcount']}[/green]"
+                album_str = a["album"]
+
+            table.add_row(f"[{color}]{status}[/{color}]", album_str, tracks_str, plays_str)
+
+        console.print()
+        console.print(table)
+
+        if albums and all(album_status(a) == "Y" for a in albums):
+            console.print("  [bold green]You've heard everything![/bold green]")
+
+    # Summary
+    if show_summary:
+        all_albums = []
+        for r in results:
+            a = filter_albums_only(r["albums"]) if albums_only else r["albums"]
+            all_albums.extend(a)
+
+        full = sum(1 for a in all_albums if album_status(a) == "Y")
+        partial = sum(1 for a in all_albums if album_status(a) == "P")
+        missing = sum(1 for a in all_albums if album_status(a) == "N")
+
+        summary_table = Table(title="Summary", title_style="bold", show_lines=False, padding=(0, 1))
+        summary_table.add_column("", width=20)
+        summary_table.add_column("Count", justify="right", width=6)
+        summary_table.add_row("Total releases", str(len(all_albums)))
+        summary_table.add_row("[green]Fully heard[/green]", f"[green]{full}[/green]")
+        summary_table.add_row("[yellow]Partial[/yellow]", f"[yellow]{partial}[/yellow]")
+        summary_table.add_row("[red]Not heard[/red]", f"[red]{missing}[/red]")
+
+        console.print()
+        console.print(summary_table)
+
+
+
+VALID_STATUSES = {"Y", "P", "N"}
+VALID_SORT_KEYS = ["popularity", "status", "tracks", "plays", "name"]
+
+
+def parse_status_filter(values: list[str]) -> list[str]:
+    statuses = [s.strip().upper() for s in values]
+    for s in statuses:
+        if s not in VALID_STATUSES:
+            raise typer.BadParameter(f"Invalid status '{s}'. Must be Y, P, or N.")
+    return statuses
+
+
+@app.command()
+def main(
+    artists: list[str] = typer.Argument(
+        default=None, help="Artist names to check"
+    ),
+    albums_only: bool = typer.Option(
+        False, "--albums-only", "-a", help="Show only albums/EPs (4+ tracks)"
+    ),
+    no_summary: bool = typer.Option(
+        False, "--no-summary", "-S", help="Hide the summary table"
+    ),
+    status: Optional[list[str]] = typer.Option(
+        None, "--status", "-s", help="Filter by status: Y, P, N (e.g. -s N -s P)"
+    ),
+    sort: str = typer.Option(
+        "popularity", "--sort", help=f"Sort albums by: {', '.join(VALID_SORT_KEYS)}"
+    ),
+    exclude: Optional[list[str]] = typer.Option(
+        None, "--exclude", "-e", help="Exclude albums containing these words (e.g. -e remix -e live)"
+    ),
+):
+    """Check if you've heard an artist's full discography on Last.fm."""
+    artists = artists or ["Caroline Polachek", "Chairlift", "Ramona Lisa", "CEP"]
+    exclude_lower = [w.lower() for w in exclude] if exclude else None
+    status_filter = parse_status_filter(status) if status else None
+    if sort not in VALID_SORT_KEYS:
+        raise typer.BadParameter(f"Invalid sort key '{sort}'. Must be one of: {', '.join(VALID_SORT_KEYS)}")
+
+    mode = "albums/EPs only" if albums_only else "all releases"
+    console.print(
+        Panel(
+            f"[bold]{', '.join(artists)}[/bold]\n"
+            f"[dim]user: {USERNAME} | mode: {mode}[/dim]",
+            title="Discography Check",
+        )
+    )
+
+    results = []
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TextColumn("[dim]{task.completed}/{task.total} albums[/dim]"),
+        console=console,
+    ) as progress:
+        for artist in artists:
+            task_id = progress.add_task(f"Fetching {artist}...", total=None)
+            results.append(check_artist(artist, progress, task_id, exclude=exclude_lower))
+            progress.update(task_id, description=f"[green]Done: {artist}[/green]")
+
+    print_report(results, albums_only=albums_only, show_summary=not no_summary,
+                 status_filter=status_filter, sort_by=sort)
+
+
+if __name__ == "__main__":
+    app()
