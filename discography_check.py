@@ -146,7 +146,7 @@ def check_artist(artist: str, progress: Progress, task_id, exclude: list[str] | 
                 "global_playcount": album["global_playcount"],
             })
         except Exception as e:
-            console.print(f"  [dim]Warning: failed to fetch '{album['name']}': {e}[/dim]", stderr=True)
+            console.print(f"  [dim]Warning: failed to fetch '{album['name']}': {e}[/dim]")
             results.append({
                 "album": album["name"],
                 "user_playcount": 0,
@@ -162,6 +162,34 @@ def check_artist(artist: str, progress: Progress, task_id, exclude: list[str] | 
         "user_total_scrobbles": info["user_playcount"],
         "albums": sorted(results, key=lambda x: -x["global_playcount"]),
     }
+
+
+def merge_results(results: list[dict]) -> list[dict]:
+    """Merge multiple artist results into one, combining albums with the same name."""
+    merged_albums = {}
+    total_scrobbles = 0
+    artist_names = []
+    for r in results:
+        artist_names.append(r["artist"])
+        total_scrobbles += r["user_total_scrobbles"]
+        for a in r["albums"]:
+            key = normalize_album_name(a["album"]).lower()
+            if key not in merged_albums:
+                merged_albums[key] = dict(a)
+            else:
+                existing = merged_albums[key]
+                existing["user_playcount"] += a["user_playcount"]
+                existing["global_playcount"] += a["global_playcount"]
+                # Merge track-level data: take the version with more tracks heard
+                if isinstance(a["total_tracks"], int) and a["tracks_heard"] > existing["tracks_heard"]:
+                    existing["total_tracks"] = a["total_tracks"]
+                    existing["tracks_heard"] = a["tracks_heard"]
+                    existing["tracks"] = a["tracks"]
+    return [{
+        "artist": " / ".join(artist_names),
+        "user_total_scrobbles": total_scrobbles,
+        "albums": sorted(merged_albums.values(), key=lambda x: -x["global_playcount"]),
+    }]
 
 
 def filter_albums_only(albums: list[dict]) -> list[dict]:
@@ -308,6 +336,9 @@ def main(
     exclude: Optional[list[str]] = typer.Option(
         None, "--exclude", "-e", help="Exclude albums containing these words (e.g. -e remix -e live)"
     ),
+    merge: bool = typer.Option(
+        False, "--merge", "-m", help="Merge albums with the same name across artists"
+    ),
 ):
     """Check if you've heard an artist's full discography on Last.fm."""
     artists = artists or ["Caroline Polachek", "Chairlift", "Ramona Lisa", "CEP"]
@@ -336,6 +367,9 @@ def main(
             task_id = progress.add_task(f"Fetching {artist}...", total=None)
             results.append(check_artist(artist, progress, task_id, exclude=exclude_lower))
             progress.update(task_id, description=f"[green]Done: {artist}[/green]")
+
+    if merge:
+        results = merge_results(results)
 
     print_report(results, albums_only=albums_only, show_summary=not no_summary,
                  status_filter=status_filter, sort_by=sort)
