@@ -4,7 +4,8 @@
 """Check if you've listened to an artist's full discography on Last.fm.
 
 Usage:
-    uv run discography_check.py "Caroline Polachek" "Chairlift" "Ramona Lisa" "CEP"
+    uv run discography_check.py "Artist Name"
+    uv run discography_check.py --merge "רונה קינן" "Rona Kenan"
     uv run discography_check.py --albums-only "Caroline Polachek"
 
 Requires env vars: LASTFM_API_KEY, LASTFM_USERNAME
@@ -319,7 +320,7 @@ def parse_status_filter(values: list[str]) -> list[str]:
 @app.command()
 def main(
     artists: list[str] = typer.Argument(
-        default=None, help="Artist names to check"
+        help="Artist names to check"
     ),
     albums_only: bool = typer.Option(
         False, "--albums-only", "-a", help="Show only albums/EPs (4+ tracks)"
@@ -341,7 +342,6 @@ def main(
     ),
 ):
     """Check if you've heard an artist's full discography on Last.fm."""
-    artists = artists or ["Caroline Polachek", "Chairlift", "Ramona Lisa", "CEP"]
     exclude_lower = [w.lower() for w in exclude] if exclude else None
     status_filter = parse_status_filter(status) if status else None
     if sort not in VALID_SORT_KEYS:
