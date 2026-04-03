@@ -14,8 +14,10 @@ Requires env vars: LASTFM_API_KEY, LASTFM_USERNAME
 import os
 import re
 import json
+import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from typing import Optional
 
 import typer
@@ -32,11 +34,18 @@ DEFAULT_USERNAME = os.environ["LASTFM_USERNAME"]
 BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
-def lastfm_request(method: str, **params) -> dict:
+def lastfm_request(method: str, retries: int = 3, **params) -> dict:
     params.update({"method": method, "api_key": API_KEY, "format": "json"})
     url = BASE_URL + "?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=15) as resp:
-        return json.loads(resp.read())
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (502, 503, 504) and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def get_artist_info(artist: str, username: str) -> dict:
