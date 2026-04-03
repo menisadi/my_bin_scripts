@@ -28,7 +28,7 @@ app = typer.Typer(help="Check your Last.fm discography coverage for an artist.")
 console = Console()
 
 API_KEY = os.environ["LASTFM_API_KEY"]
-USERNAME = os.environ["LASTFM_USERNAME"]
+DEFAULT_USERNAME = os.environ["LASTFM_USERNAME"]
 BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
 
@@ -39,8 +39,8 @@ def lastfm_request(method: str, **params) -> dict:
         return json.loads(resp.read())
 
 
-def get_artist_info(artist: str) -> dict:
-    data = lastfm_request("artist.getinfo", artist=artist, username=USERNAME)
+def get_artist_info(artist: str, username: str) -> dict:
+    data = lastfm_request("artist.getinfo", artist=artist, username=username)
     info = data.get("artist", {})
     stats = info.get("stats", {})
     return {
@@ -68,8 +68,8 @@ def get_artist_albums(artist: str) -> list[dict]:
     return albums
 
 
-def get_user_album_info(artist: str, album: str) -> dict:
-    data = lastfm_request("album.getinfo", artist=artist, album=album, username=USERNAME)
+def get_user_album_info(artist: str, album: str, username: str) -> dict:
+    data = lastfm_request("album.getinfo", artist=artist, album=album, username=username)
     if "error" in data:
         raise ValueError(f"API error {data['error']}: {data.get('message', '')}")
     album_data = data.get("album", {})
@@ -94,16 +94,29 @@ def get_user_album_info(artist: str, album: str) -> dict:
     }
 
 
+NORMALIZE_KEYWORDS = [
+    "version",
+    "remaster(?:ed)?",
+    "deluxe",
+    "edition",
+    "expanded",
+    "anniversary",
+    "bonus",
+    "explicit",
+    "special",
+    "collector",
+    "re-?issue",
+    "single",
+    r"EP\b",
+]
+
+
 def normalize_album_name(name: str) -> str:
-    norm = name
-    for suffix in [
-        " - EP", " - Single", " (EP)", " (Single)", " [EP]",
-        " [Explicit]", " (Explicit)", " [Deluxe]", " (Deluxe)",
-        " (Bonus Track Edition)", " [Bonus Tracks]",
-        " (Reissue)", " (2009 Re-issue)", " (2009 Re-",
-    ]:
-        if norm.lower().endswith(suffix.lower()):
-            norm = norm[: -len(suffix)]
+    kw = "(?:" + "|".join(NORMALIZE_KEYWORDS) + ")"
+    # Remove " - <anything with keyword>..." at end
+    norm = re.sub(rf'\s*[-–—]\s*.*?{kw}.*$', '', name, flags=re.IGNORECASE)
+    # Remove (...keyword...) or [...keyword...]
+    norm = re.sub(rf'\s*[(\[].*?{kw}.*?[)\]]', '', norm, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", norm).strip()
 
 
@@ -112,32 +125,49 @@ def matches_exclude(name: str, exclude: list[str]) -> bool:
     return any(word in lower for word in exclude)
 
 
-def deduplicate_albums(albums: list[dict]) -> list[dict]:
-    seen = {}
+def merge_album_versions(albums: list[dict]) -> list[dict]:
+    """Merge albums that normalize to the same name, combining play counts."""
+    merged = {}
     for a in albums:
-        norm = normalize_album_name(a["name"]).lower()
-        if norm not in seen or a["global_playcount"] > seen[norm]["global_playcount"]:
-            seen[norm] = a
-    return list(seen.values())
+        key = normalize_album_name(a["album"]).lower()
+        if key not in merged:
+            merged[key] = dict(a)
+        else:
+            existing = merged[key]
+            existing["user_playcount"] += a["user_playcount"]
+            existing["global_playcount"] += a["global_playcount"]
+            if isinstance(a["total_tracks"], int) and a["tracks_heard"] > existing.get("tracks_heard", 0):
+                existing["total_tracks"] = a["total_tracks"]
+                existing["tracks_heard"] = a["tracks_heard"]
+                existing["tracks"] = a["tracks"]
+            # Prefer shorter name (usually the clean version)
+            if len(a["album"]) < len(existing["album"]):
+                existing["album"] = a["album"]
+    return list(merged.values())
 
 
-def check_artist(artist: str, progress: Progress, task_id, exclude: list[str] | None = None) -> dict:
-    info = get_artist_info(artist)
+def check_artist(artist: str, progress: Progress, task_id, username: str, exclude: list[str] | None = None,
+                  dedup: bool = True, min_threshold: int | None = None) -> dict:
+    info = get_artist_info(artist, username)
     all_albums = get_artist_albums(artist)
 
     real_albums = [a for a in all_albums if not matches_exclude(a["name"], exclude)] if exclude else all_albums
-    real_albums = deduplicate_albums(real_albums)
 
+    total_before_filter = len(real_albums)
+    threshold = 0
     if real_albums:
-        max_pc = max(a["global_playcount"] for a in real_albums)
-        threshold = max(1000, int(max_pc * 0.001))
+        if min_threshold is not None:
+            threshold = min_threshold
+        else:
+            max_pc = max(a["global_playcount"] for a in real_albums)
+            threshold = max(1000, int(max_pc * 0.001))
         real_albums = [a for a in real_albums if a["global_playcount"] >= threshold]
 
     progress.update(task_id, total=len(real_albums), completed=0)
     results = []
     for i, album in enumerate(real_albums):
         try:
-            album_info = get_user_album_info(artist, album["name"])
+            album_info = get_user_album_info(artist, album["name"], username)
             results.append({
                 "album": album_info["name"],
                 "user_playcount": album_info["user_playcount"],
@@ -158,10 +188,19 @@ def check_artist(artist: str, progress: Progress, task_id, exclude: list[str] | 
             })
         progress.update(task_id, completed=i + 1)
 
+    albums_before_dedup = len(results)
+    if dedup:
+        results = merge_album_versions(results)
+
     return {
         "artist": info["name"],
         "user_total_scrobbles": info["user_playcount"],
         "albums": sorted(results, key=lambda x: -x["global_playcount"]),
+        "stats": {
+            "threshold": threshold,
+            "filtered_out": total_before_filter - len(real_albums),
+            "merged": albums_before_dedup - len(results),
+        },
     }
 
 
@@ -231,8 +270,18 @@ def sort_albums(albums: list[dict], sort_by: str) -> list[dict]:
 
 
 def print_report(results: list[dict], albums_only: bool = False, show_summary: bool = True,
-                 status_filter: list[str] | None = None, sort_by: str = "popularity"):
+                 status_filter: list[str] | None = None, sort_by: str = "popularity",
+                 verbosity: int = 0):
     for r in results:
+        if verbosity >= 2:
+            stats = r.get("stats", {})
+            parts = [f"threshold: {stats.get('threshold', '?')}"]
+            if stats.get("filtered_out"):
+                parts.append(f"{stats['filtered_out']} albums below threshold")
+            if stats.get("merged"):
+                parts.append(f"{stats['merged']} versions merged")
+            console.print(f"  [dim]{' | '.join(parts)}[/dim]")
+
         albums = filter_albums_only(r["albums"]) if albums_only else r["albums"]
         if status_filter:
             albums = [a for a in albums if album_status(a) in status_filter]
@@ -340,6 +389,18 @@ def main(
     merge: bool = typer.Option(
         False, "--merge", "-m", help="Merge albums with the same name across artists"
     ),
+    no_dedup: bool = typer.Option(
+        False, "--no-dedup", help="Don't merge different versions of the same album"
+    ),
+    username: str = typer.Option(
+        DEFAULT_USERNAME, "--user", "-u", help="Last.fm username (default: LASTFM_USERNAME env var)"
+    ),
+    min_threshold: Optional[int] = typer.Option(
+        None, "--min-plays", "-p", help="Minimum global playcount to include an album (default: auto)"
+    ),
+    verbose: int = typer.Option(
+        0, "--verbose", "-v", count=True, help="Increase verbosity (-v for info, -vv for details)"
+    ),
 ):
     """Check if you've heard an artist's full discography on Last.fm."""
     exclude_lower = [w.lower() for w in exclude] if exclude else None
@@ -348,13 +409,10 @@ def main(
         raise typer.BadParameter(f"Invalid sort key '{sort}'. Must be one of: {', '.join(VALID_SORT_KEYS)}")
 
     mode = "albums/EPs only" if albums_only else "all releases"
-    console.print(
-        Panel(
-            f"[bold]{', '.join(artists)}[/bold]\n"
-            f"[dim]user: {USERNAME} | mode: {mode}[/dim]",
-            title="Discography Check",
-        )
-    )
+    panel_lines = [f"[bold]{', '.join(artists)}[/bold]"]
+    if verbose >= 1:
+        panel_lines.append(f"[dim]user: {username} | mode: {mode} | min-plays: {min_threshold or 'auto'}[/dim]")
+    console.print(Panel("\n".join(panel_lines), title="Discography Check"))
 
     results = []
     with Progress(
@@ -365,14 +423,16 @@ def main(
     ) as progress:
         for artist in artists:
             task_id = progress.add_task(f"Fetching {artist}...", total=None)
-            results.append(check_artist(artist, progress, task_id, exclude=exclude_lower))
+            results.append(check_artist(artist, progress, task_id, username=username,
+                                        exclude=exclude_lower, dedup=not no_dedup,
+                                        min_threshold=min_threshold))
             progress.update(task_id, description=f"[green]Done: {artist}[/green]")
 
     if merge:
         results = merge_results(results)
 
     print_report(results, albums_only=albums_only, show_summary=not no_summary,
-                 status_filter=status_filter, sort_by=sort)
+                 status_filter=status_filter, sort_by=sort, verbosity=verbose)
 
 
 if __name__ == "__main__":
