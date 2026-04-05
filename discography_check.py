@@ -59,19 +59,38 @@ def get_artist_info(artist: str, username: str) -> dict:
     }
 
 
-def get_artist_albums(artist: str) -> list[dict]:
+def get_artist_albums(artist: str, min_threshold: int | None = None) -> list[dict]:
     albums = []
     page = 1
+    threshold = min_threshold
     while True:
         data = lastfm_request("artist.gettopalbums", artist=artist, limit=50, page=page)
         top = data.get("topalbums", {})
         batch = top.get("album", [])
         if not batch:
             break
+
+        if threshold is None:
+            max_pc = max(int(a.get("playcount", 0)) for a in batch)
+            threshold = max(1000, int(max_pc * 0.001))
+
+        batch_below_threshold = True
         for a in batch:
+            playcount = int(a.get("playcount", 0))
+            if playcount < threshold:
+                continue
+            batch_below_threshold = False
             albums.append(
-                {"name": a["name"], "global_playcount": int(a.get("playcount", 0))}
+                {
+                    "name": a["name"],
+                    "artist": a.get("artist", {}).get("name", artist),
+                    "global_playcount": playcount,
+                }
             )
+
+        if batch_below_threshold:
+            break
+
         total_pages = int(top.get("@attr", {}).get("totalPages", 1))
         if page >= total_pages:
             break
@@ -170,6 +189,30 @@ def merge_album_versions(albums: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+def dedupe_album_candidates(albums: list[dict]) -> list[dict]:
+    """Collapse obvious version duplicates before album.getinfo calls."""
+    merged = {}
+    for album in albums:
+        key = normalize_album_name(album["name"]).lower()
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = dict(album)
+            continue
+
+        total_playcount = existing["global_playcount"] + album["global_playcount"]
+        preferred_name = (
+            album["name"] if len(album["name"]) < len(existing["name"]) else existing["name"]
+        )
+        preferred = album if album["global_playcount"] > existing["global_playcount"] else existing
+        merged[key] = {
+            "name": preferred_name,
+            "global_playcount": total_playcount,
+            **{k: v for k, v in preferred.items() if k not in {"name", "global_playcount"}},
+        }
+
+    return list(merged.values())
+
+
 def check_artist(
     artist: str,
     progress: Progress,
@@ -180,7 +223,7 @@ def check_artist(
     min_threshold: int | None = None,
 ) -> dict:
     info = get_artist_info(artist, username)
-    all_albums = get_artist_albums(artist)
+    all_albums = get_artist_albums(artist, min_threshold=min_threshold)
 
     real_albums = (
         [a for a in all_albums if not matches_exclude(a["name"], exclude)]
@@ -189,20 +232,21 @@ def check_artist(
     )
 
     total_before_filter = len(real_albums)
-    threshold = 0
+    threshold = min_threshold or 0
     if real_albums:
-        if min_threshold is not None:
-            threshold = min_threshold
-        else:
+        if min_threshold is None:
             max_pc = max(a["global_playcount"] for a in real_albums)
             threshold = max(1000, int(max_pc * 0.001))
         real_albums = [a for a in real_albums if a["global_playcount"] >= threshold]
+        if dedup:
+            real_albums = dedupe_album_candidates(real_albums)
 
-    progress.update(task_id, total=len(real_albums), completed=0)
+        progress.update(task_id, total=len(real_albums), completed=0)
     results = []
     for i, album in enumerate(real_albums):
         try:
-            album_info = get_user_album_info(artist, album["name"], username)
+            album_artist = album.get("artist", artist)
+            album_info = get_user_album_info(album_artist, album["name"], username)
             results.append(
                 {
                     "album": album_info["name"],
@@ -242,6 +286,53 @@ def check_artist(
             "filtered_out": total_before_filter - len(real_albums),
             "merged": albums_before_dedup - len(results),
         },
+    }
+
+
+def estimate_threshold_impact(
+    artist: str,
+    username: str,
+    exclude: list[str] | None = None,
+    dedup: bool = True,
+    min_threshold: int | None = None,
+    albums_only: bool = False,
+) -> dict:
+    info = get_artist_info(artist, username)
+    albums = get_artist_albums(artist, min_threshold=min_threshold)
+    if exclude:
+        albums = [a for a in albums if not matches_exclude(a["name"], exclude)]
+
+    threshold = min_threshold or 0
+    if albums and min_threshold is None:
+        max_pc = max(a["global_playcount"] for a in albums)
+        threshold = max(1000, int(max_pc * 0.001))
+        albums = [a for a in albums if a["global_playcount"] >= threshold]
+
+    raw_count = len(albums)
+    deduped = dedupe_album_candidates(albums) if dedup else albums
+
+    estimated_final_count = len(deduped)
+    if albums_only:
+        estimated_final_count = 0
+        for album in deduped:
+            try:
+                album_info = get_user_album_info(
+                    album.get("artist", artist), album["name"], username
+                )
+            except Exception:
+                continue
+            if album_info["total_tracks"] >= 4:
+                estimated_final_count += 1
+
+    playcounts = [a["global_playcount"] for a in deduped]
+    return {
+        "artist": info["name"],
+        "threshold": threshold,
+        "raw_count": raw_count,
+        "deduped_count": len(deduped),
+        "estimated_final_count": estimated_final_count,
+        "top_playcount": max(playcounts) if playcounts else 0,
+        "bottom_playcount": min(playcounts) if playcounts else 0,
     }
 
 
@@ -420,6 +511,35 @@ def print_report(
         console.print(summary_table)
 
 
+def print_threshold_estimates(estimates: list[dict]) -> None:
+    table = Table(
+        title="Threshold Estimate", title_style="bold", show_lines=False, padding=(0, 1)
+    )
+    table.add_column("Artist", no_wrap=True)
+    table.add_column("Threshold", justify="right", no_wrap=True)
+    table.add_column("Candidates", justify="right", no_wrap=True)
+    table.add_column("After dedup", justify="right", no_wrap=True)
+    table.add_column("Final count", justify="right", no_wrap=True)
+    table.add_column("Playcount range", justify="right")
+
+    for e in estimates:
+        if e["deduped_count"]:
+            range_str = f"{e['bottom_playcount']:,} - {e['top_playcount']:,}"
+        else:
+            range_str = "-"
+        table.add_row(
+            e["artist"],
+            f"{e['threshold']:,}",
+            str(e["raw_count"]),
+            str(e["deduped_count"]),
+            str(e["estimated_final_count"]),
+            range_str,
+        )
+
+    console.print()
+    console.print(table)
+
+
 VALID_STATUSES = {"Y", "P", "N"}
 VALID_SORT_KEYS = ["popularity", "status", "tracks", "plays", "name"]
 
@@ -471,6 +591,12 @@ def main(
         "-p",
         help="Minimum global playcount to include an album (default: auto)",
     ),
+    estimate_threshold: bool = typer.Option(
+        False,
+        "--estimate-threshold",
+        "-E",
+        help="Show how many releases pass the threshold, then exit",
+    ),
     verbose: int = typer.Option(
         0,
         "--verbose",
@@ -494,6 +620,22 @@ def main(
             f"[dim]user: {username} | mode: {mode} | min-plays: {min_threshold or 'auto'}[/dim]"
         )
     console.print(Panel("\n".join(panel_lines), title="Discography Check"))
+
+    if estimate_threshold:
+        estimates = []
+        for artist in artists:
+            estimates.append(
+                estimate_threshold_impact(
+                    artist,
+                    username=username,
+                    exclude=exclude_lower,
+                    dedup=not no_dedup,
+                    min_threshold=min_threshold,
+                    albums_only=albums_only,
+                )
+            )
+        print_threshold_estimates(estimates)
+        return
 
     results = []
     with Progress(
