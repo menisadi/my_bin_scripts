@@ -7,6 +7,7 @@ Usage: vmb [OPTIONS]
 
 Flags:
   -h, --help          Show this help
+  --base COMMIT       Base commit/branch to diff against (default: auto-detect)
   --root PATH         Repo root (default: cwd)
   --top INTEGER       Show top N remaining by LOC
   --all               Show all remaining files
@@ -15,9 +16,28 @@ EOF
   exit 0
 fi
 
-base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
-base=${base#origin/}
-[[ -n "$base" ]] || base=main
+# Parse --base flag (consume it before passing remaining args to vibemark)
+base=""
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base)
+      base="$2"
+      shift 2
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${args[@]}"
+
+if [[ -z "$base" ]]; then
+  base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  base=${base#origin/}
+  [[ -n "$base" ]] || base=main
+fi
 
 changed_files=$(git diff "${base}...HEAD" --name-only)
 
