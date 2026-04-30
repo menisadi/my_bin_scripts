@@ -3,6 +3,7 @@
 # dependencies = ["rich", "python-chess"]
 # ///
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from rich.panel import Panel
 from rich.text import Text
 
 console = Console()
+
+logging.getLogger("chess.engine").setLevel(logging.CRITICAL)
 
 # --- Lichess-ish ACPL knobs ---
 LICHESS_START_CP_WHITE = 15  # Lichess uses +15cp as the starting eval for White
@@ -109,8 +112,9 @@ def score_to_capped_cp(score: chess.engine.PovScore, pov: chess.Color) -> int:
 
 def analyze_game(
     pgn_path: str,
-    stockfish_path: str,
+    engine_path: str,
     depth: int = 14,
+    nodes: int | None = None,
     threads: int | None = None,
     hash_mb: int | None = None,
     collect_evals: bool = False,
@@ -121,10 +125,10 @@ def analyze_game(
     total_plies = 0
 
     try:
-        engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+        engine = chess.engine.SimpleEngine.popen_uci(engine_path)
     except Exception as e:
         console.print(
-            f"[bold red]Error:[/bold red] Could not start Stockfish at {stockfish_path}. {e}"
+            f"[bold red]Error:[/bold red] Could not start engine at {engine_path}. {e}"
         )
         sys.exit(1)
 
@@ -180,7 +184,8 @@ def analyze_game(
                 f"[bold white]{game.headers.get('White', 'Unknown')}[/bold white] vs "
                 f"[bold white]{game.headers.get('Black', 'Unknown')}[/bold white]\n"
                 f"[cyan]Result:[/cyan] [bold yellow]{game.headers.get('Result', '*')}[/bold yellow] | "
-                f"[cyan]Depth:[/cyan] {depth}"
+                + (f"[cyan]Nodes:[/cyan] {nodes}" if nodes is not None else f"[cyan]Depth:[/cyan] {depth}")
+                + f" | [cyan]Engine:[/cyan] {Path(engine_path).name}"
             )
             console.print(
                 Panel(
@@ -206,7 +211,8 @@ def analyze_game(
                     mover = board.turn  # who is playing this move
                     board.push(move)
 
-                    info = engine.analyse(board, chess.engine.Limit(depth=depth))
+                    limit = chess.engine.Limit(nodes=nodes) if nodes is not None else chess.engine.Limit(depth=depth)
+                    info = engine.analyse(board, limit)
                     eval_white_cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
 
                     if evals_white_cp is not None:
@@ -305,7 +311,7 @@ def print_report(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Analyze a PGN file using Stockfish (Lichess-ish ACPL)."
+        description="Analyze a PGN file using a UCI engine (Lichess-ish ACPL)."
     )
     parser.add_argument("pgn", help="Path to the PGN file")
     parser.add_argument(
@@ -315,10 +321,13 @@ if __name__ == "__main__":
         "--depth", type=int, default=14, help="Analysis depth (higher = slower)"
     )
     parser.add_argument(
-        "--threads", type=int, default=None, help="Stockfish Threads (optional)"
+        "--nodes", type=int, default=None, help="Node limit per move (overrides --depth; natural fit for lc0)"
     )
     parser.add_argument(
-        "--hash", type=int, default=None, help="Stockfish Hash in MB (optional)"
+        "--threads", type=int, default=None, help="Engine Threads option (optional)"
+    )
+    parser.add_argument(
+        "--hash", type=int, default=None, help="Engine Hash in MB (optional)"
     )
     parser.add_argument(
         "--header",
@@ -376,6 +385,7 @@ if __name__ == "__main__":
             args.pgn,
             args.engine,
             depth=args.depth,
+            nodes=args.nodes,
             threads=args.threads,
             hash_mb=args.hash,
             collect_evals=args.evalbar,
