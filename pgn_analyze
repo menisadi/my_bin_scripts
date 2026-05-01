@@ -4,6 +4,7 @@
 # ///
 import argparse
 import logging
+import math
 import sys
 from pathlib import Path
 
@@ -30,10 +31,41 @@ logging.getLogger("chess.engine").setLevel(logging.CRITICAL)
 LICHESS_START_CP_WHITE = 15  # Lichess uses +15cp as the starting eval for White
 EVAL_CAP_CP = 1000  # Lichess caps evals to [-1000, +1000] and maps mates to +/-1000
 
-# --- Your classification thresholds (in centipawns of loss) ---
-INACCURACY_THRESHOLD = 50
-MISTAKE_THRESHOLD = 100
-BLUNDER_THRESHOLD = 300
+# --- CPL classification thresholds (centipawns of loss) ---
+INACCURACY_THRESHOLD_CPL = 50
+MISTAKE_THRESHOLD_CPL = 100
+BLUNDER_THRESHOLD_CPL = 300
+
+# --- WDL classification thresholds (per-mille win-probability loss, out of 1000) ---
+LICHESS_START_WIN_WHITE = 530  # ~53% win probability for White at move 0
+INACCURACY_THRESHOLD_WDL = 20  # 2%
+MISTAKE_THRESHOLD_WDL = 50     # 5%
+BLUNDER_THRESHOLD_WDL = 100    # 10%
+
+# --- Lichess accuracy mode ---
+# Win% formula: calibrated on ~2300-rated human games
+# Win% = 50 + 50 * (2 / (1 + exp(-K * cp)) - 1)
+LICHESS_WIN_PCT_K = 0.00368208
+# Per-move accuracy formula: 103.1668 * exp(-0.04354 * win_pct_loss) - 3.1669
+LICHESS_ACC_A = 103.1668
+LICHESS_ACC_B = 0.04354
+LICHESS_ACC_C = 3.1669
+# Classification thresholds in win% loss (0-100 scale)
+INACCURACY_THRESHOLD_LICHESS = 2.0   # 2% win prob loss
+MISTAKE_THRESHOLD_LICHESS = 5.0      # 5%
+BLUNDER_THRESHOLD_LICHESS = 10.0     # 10%
+
+
+def cp_to_win_pct(cp: float) -> float:
+    """Convert centipawns to win% using Lichess's human-calibrated formula."""
+    return 50 + 50 * (2 / (1 + math.exp(-LICHESS_WIN_PCT_K * cp)) - 1)
+
+
+def move_accuracy_pct(win_pct_before: float, win_pct_after: float) -> float:
+    """Compute per-move accuracy% from mover's win% before and after (Lichess formula)."""
+    loss = max(0.0, win_pct_before - win_pct_after)
+    raw = LICHESS_ACC_A * math.exp(-LICHESS_ACC_B * loss) - LICHESS_ACC_C
+    return max(0.0, min(100.0, raw))
 
 
 def cp_to_gray_level(cp: int, cap_cp: int, steps: int) -> int:
@@ -57,24 +89,39 @@ def cp_to_gray_level(cp: int, cap_cp: int, steps: int) -> int:
 
 
 def print_eval_bar(
-    evals_white_cp: list[int],
+    evals_white: list[float],
     *,
+    mode: str = "cpl",
     cap_cp: int = EVAL_CAP_CP,
     steps: int = 24,
     wrap_width: int | None = None,
-    title: str = "Evaluation bar (White POV)",
     show_legend: bool = True,
 ):
-    if not evals_white_cp:
+    if not evals_white:
         return
+
+    titles = {
+        "cpl": "Evaluation bar (White POV — centipawns)",
+        "wdl": "Evaluation bar (White POV — win probability)",
+        "lichess": "Evaluation bar (White POV — win %)",
+    }
+    title = titles.get(mode, "Evaluation bar (White POV)")
 
     usable_width = max(10, int(wrap_width)) if wrap_width else max(10, console.width - 2)
     block_char = " "
     lines: list[Text] = []
 
     cur = Text()
-    for i, cp in enumerate(evals_white_cp, start=1):
-        g = cp_to_gray_level(cp, cap_cp=cap_cp, steps=steps)
+    for i, val in enumerate(evals_white, start=1):
+        if mode == "cpl":
+            g = cp_to_gray_level(int(val), cap_cp=cap_cp, steps=steps)
+        else:
+            scale = 1000.0 if mode == "wdl" else 100.0
+            raw = clamp(int(round(val * 255 / scale)), 0, 255)
+            if steps >= 2:
+                step = 255 / (steps - 1)
+                raw = int(round(raw / step) * step)
+            g = clamp(raw, 0, 255)
         cur.append(block_char, style=f"on rgb({g},{g},{g})")
         if (i % usable_width) == 0:
             lines.append(cur)
@@ -94,7 +141,7 @@ def print_eval_bar(
     console.print()
 
 
-def clamp(x: int, lo: int, hi: int) -> int:
+def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
@@ -113,6 +160,7 @@ def score_to_capped_cp(score: chess.engine.PovScore, pov: chess.Color) -> int:
 def analyze_game(
     pgn_path: str,
     engine_path: str,
+    mode: str = "cpl",
     depth: int = 14,
     nodes: int | None = None,
     threads: int | None = None,
@@ -120,7 +168,7 @@ def analyze_game(
     collect_evals: bool = False,
     show_header: bool = True,
 ):
-    evals_white_cp: list[int] | None = [] if collect_evals else None
+    evals_white: list[float] | None = [] if collect_evals else None
     interrupted = False
     total_plies = 0
 
@@ -133,17 +181,17 @@ def analyze_game(
         sys.exit(1)
 
     try:
-        # Optional engine tuning (safe if the option exists)
         opts = {}
         if threads is not None:
             opts["Threads"] = threads
         if hash_mb is not None:
             opts["Hash"] = hash_mb
+        if mode == "wdl":
+            opts["UCI_ShowWDL"] = True
         if opts:
             try:
                 engine.configure(opts)
             except Exception:
-                # If some options don't exist for this engine build, just ignore.
                 pass
 
         try:
@@ -164,14 +212,16 @@ def analyze_game(
 
         stats = {
             chess.WHITE: {
-                "cpl_total": 0,
+                "loss_total": 0.0,
+                "accuracy_total": 0.0,
                 "moves": 0,
                 "inaccuracies": 0,
                 "mistakes": 0,
                 "blunders": 0,
             },
             chess.BLACK: {
-                "cpl_total": 0,
+                "loss_total": 0.0,
+                "accuracy_total": 0.0,
                 "moves": 0,
                 "inaccuracies": 0,
                 "mistakes": 0,
@@ -186,6 +236,7 @@ def analyze_game(
                 f"[cyan]Result:[/cyan] [bold yellow]{game.headers.get('Result', '*')}[/bold yellow] | "
                 + (f"[cyan]Nodes:[/cyan] {nodes}" if nodes is not None else f"[cyan]Depth:[/cyan] {depth}")
                 + f" | [cyan]Engine:[/cyan] {Path(engine_path).name}"
+                + f" | [cyan]Mode:[/cyan] {mode.upper()}"
             )
             console.print(
                 Panel(
@@ -193,9 +244,21 @@ def analyze_game(
                 )
             )
 
-        # Lichess-style: use a sequence of evals (from White POV) AFTER each ply,
-        # with a fixed starting eval of +15cp for White at ply 0.
-        prev_eval_white_cp = LICHESS_START_CP_WHITE
+        if mode == "wdl":
+            prev_eval_white = float(LICHESS_START_WIN_WHITE)
+            inaccuracy_threshold = INACCURACY_THRESHOLD_WDL
+            mistake_threshold = MISTAKE_THRESHOLD_WDL
+            blunder_threshold = BLUNDER_THRESHOLD_WDL
+        elif mode == "lichess":
+            prev_eval_white = cp_to_win_pct(LICHESS_START_CP_WHITE)
+            inaccuracy_threshold = INACCURACY_THRESHOLD_LICHESS
+            mistake_threshold = MISTAKE_THRESHOLD_LICHESS
+            blunder_threshold = BLUNDER_THRESHOLD_LICHESS
+        else:  # cpl
+            prev_eval_white = float(LICHESS_START_CP_WHITE)
+            inaccuracy_threshold = INACCURACY_THRESHOLD_CPL
+            mistake_threshold = MISTAKE_THRESHOLD_CPL
+            blunder_threshold = BLUNDER_THRESHOLD_CPL
 
         with Progress(
             SpinnerColumn(),
@@ -208,42 +271,62 @@ def analyze_game(
 
             try:
                 for move in game.mainline_moves():
-                    mover = board.turn  # who is playing this move
+                    mover = board.turn
                     board.push(move)
 
                     limit = chess.engine.Limit(nodes=nodes) if nodes is not None else chess.engine.Limit(depth=depth)
                     info = engine.analyse(board, limit)
-                    eval_white_cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
 
-                    if evals_white_cp is not None:
-                        evals_white_cp.append(eval_white_cp)
+                    if mode == "wdl":
+                        wdl = info.get("wdl")
+                        if wdl is None:
+                            console.print(
+                                "\n[bold red]Error:[/bold red] Engine did not return WDL data. "
+                                "For Stockfish, this should work automatically. "
+                                "For lc0, use plain [bold]lc0[/bold] (not lc0-cp) in WDL mode."
+                            )
+                            return None, None, None, interrupted, total_plies
+                        eval_white = float(wdl.pov(chess.WHITE).wins)
+                    elif mode == "lichess":
+                        cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
+                        eval_white = cp_to_win_pct(cp)
+                    else:  # cpl
+                        eval_white = float(score_to_capped_cp(info["score"], pov=chess.WHITE))
 
-                    # Loss from mover POV:
-                    # - If White moved: loss = max(0, prev_white_eval - new_white_eval)
-                    # - If Black moved: loss = max(0, prev_black_eval - new_black_eval)
-                    #   but black_eval = -white_eval, so loss = max(0, (-prev) - (-new)) = max(0, new - prev)
+                    if evals_white is not None:
+                        evals_white.append(eval_white)
+
                     if mover == chess.WHITE:
-                        loss = max(0, prev_eval_white_cp - eval_white_cp)
+                        loss = max(0.0, prev_eval_white - eval_white)
                     else:
-                        loss = max(0, eval_white_cp - prev_eval_white_cp)
+                        loss = max(0.0, eval_white - prev_eval_white)
 
-                    stats[mover]["cpl_total"] += loss
+                    stats[mover]["loss_total"] += loss
                     stats[mover]["moves"] += 1
 
-                    if loss >= BLUNDER_THRESHOLD:
+                    if mode == "lichess":
+                        if mover == chess.WHITE:
+                            accuracy = move_accuracy_pct(prev_eval_white, eval_white)
+                        else:
+                            accuracy = move_accuracy_pct(
+                                100.0 - prev_eval_white, 100.0 - eval_white
+                            )
+                        stats[mover]["accuracy_total"] += accuracy
+
+                    if loss >= blunder_threshold:
                         stats[mover]["blunders"] += 1
-                    elif loss >= MISTAKE_THRESHOLD:
+                    elif loss >= mistake_threshold:
                         stats[mover]["mistakes"] += 1
-                    elif loss >= INACCURACY_THRESHOLD:
+                    elif loss >= inaccuracy_threshold:
                         stats[mover]["inaccuracies"] += 1
 
-                    prev_eval_white_cp = eval_white_cp
+                    prev_eval_white = eval_white
                     progress.update(task, advance=1)
             except KeyboardInterrupt:
                 interrupted = True
                 progress.update(task, description="Stopping analysis...")
 
-        return stats, game.headers, evals_white_cp, interrupted, total_plies
+        return stats, game.headers, evals_white, interrupted, total_plies
 
     finally:
         try:
@@ -255,6 +338,7 @@ def analyze_game(
 def print_report(
     stats,
     headers,
+    mode: str = "cpl",
     total_plies: int | None = None,
     interrupted: bool = False,
     show_error_summary: bool = True,
@@ -269,10 +353,19 @@ def print_report(
         table.add_column("White", justify="center", width=10)
         table.add_column("Black", justify="center", width=10)
 
-        w_avg_cpl = (w["cpl_total"] / w["moves"]) if w["moves"] else 0.0
-        b_avg_cpl = (b["cpl_total"] / b["moves"]) if b["moves"] else 0.0
+        if mode == "lichess":
+            w_acc = (w["accuracy_total"] / w["moves"]) if w["moves"] else 0.0
+            b_acc = (b["accuracy_total"] / b["moves"]) if b["moves"] else 0.0
+            table.add_row("Avg Accuracy", f"{w_acc:.1f}%", f"{b_acc:.1f}%")
+        elif mode == "wdl":
+            w_avg = (w["loss_total"] / w["moves"]) if w["moves"] else 0.0
+            b_avg = (b["loss_total"] / b["moves"]) if b["moves"] else 0.0
+            table.add_row("Avg WPL", f"{w_avg / 10:.1f}%", f"{b_avg / 10:.1f}%")
+        else:  # cpl
+            w_avg = (w["loss_total"] / w["moves"]) if w["moves"] else 0.0
+            b_avg = (b["loss_total"] / b["moves"]) if b["moves"] else 0.0
+            table.add_row("Avg CPL", f"{w_avg:.1f}", f"{b_avg:.1f}")
 
-        table.add_row("Avg CPL", f"{w_avg_cpl:.1f}", f"{b_avg_cpl:.1f}")
         table.add_row(
             "Inaccuracies",
             f"[yellow]{w['inaccuracies']}[/yellow]",
@@ -297,31 +390,43 @@ def print_report(
     analyzed_plies = w["moves"] + b["moves"]
     if total_plies is not None:
         if interrupted:
-            summary = (
-                f"Analysis interrupted after {analyzed_plies} total plies out of {total_plies}."
-            )
+            summary = f"Analysis interrupted after {analyzed_plies} total plies out of {total_plies}."
         else:
-            summary = (
-                f"Analysis completed for {analyzed_plies} total plies out of {total_plies}."
-            )
+            summary = f"Analysis completed for {analyzed_plies} total plies out of {total_plies}."
     else:
         summary = f"Analysis completed for {analyzed_plies} total plies."
-    console.print(f"\n[dim]{summary}[/dim]\n")
+
+    console.print(f"\n[dim]{summary}[/dim]")
+    if mode == "lichess":
+        console.print("[dim]Note: Avg Accuracy is a plain move average; Lichess uses volatility weighting.[/dim]")
+    console.print()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Analyze a PGN file using a UCI engine (Lichess-ish ACPL)."
+        description="Analyze a PGN file using a UCI engine (CPL, WDL, or Lichess accuracy mode)."
     )
     parser.add_argument("pgn", help="Path to the PGN file")
     parser.add_argument(
-        "--engine", default="stockfish", help="Path to Stockfish binary"
+        "--engine", default="stockfish", help="Path to engine binary"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["cpl", "wdl", "lichess"],
+        default="cpl",
+        help=(
+            "Scoring mode: "
+            "'cpl' = centipawn loss (default); "
+            "'wdl' = win-probability loss from engine WDL output; "
+            "'lichess' = Lichess accuracy%% (centipawns → human-calibrated Win%% → accuracy%%, "
+            "best with Stockfish)."
+        ),
     )
     parser.add_argument(
         "--depth", type=int, default=14, help="Analysis depth (higher = slower)"
     )
     parser.add_argument(
-        "--nodes", type=int, default=None, help="Node limit per move (overrides --depth; natural fit for lc0)"
+        "--nodes", type=int, default=None, help="Node limit per move (overrides --depth)"
     )
     parser.add_argument(
         "--threads", type=int, default=None, help="Engine Threads option (optional)"
@@ -339,7 +444,7 @@ if __name__ == "__main__":
         "--error-summary",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Show/hide summary table with Avg CPL and error counts (default: on).",
+        help="Show/hide summary table (default: on).",
     )
     parser.add_argument(
         "--completion-summary",
@@ -357,7 +462,7 @@ if __name__ == "__main__":
         "--evalbar-cap",
         type=int,
         default=400,
-        help="Centipawn cap for mapping to grayscale (default: 400).",
+        help="Centipawn cap for eval bar grayscale mapping; only applies in CPL mode (default: 400).",
     )
     parser.add_argument(
         "--evalbar-steps",
@@ -384,6 +489,7 @@ if __name__ == "__main__":
         results, headers, evals, interrupted, total_plies = analyze_game(
             args.pgn,
             args.engine,
+            mode=args.mode,
             depth=args.depth,
             nodes=args.nodes,
             threads=args.threads,
@@ -401,6 +507,7 @@ if __name__ == "__main__":
         print_report(
             results,
             headers,
+            mode=args.mode,
             total_plies=total_plies,
             interrupted=interrupted,
             show_error_summary=args.error_summary,
@@ -409,6 +516,7 @@ if __name__ == "__main__":
         if args.evalbar and evals:
             print_eval_bar(
                 evals,
+                mode=args.mode,
                 cap_cp=args.evalbar_cap,
                 steps=args.evalbar_steps,
                 wrap_width=args.evalbar_wrap,
