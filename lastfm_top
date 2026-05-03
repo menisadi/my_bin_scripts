@@ -21,11 +21,14 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import requests
 
 API_ROOT = "https://ws.audioscrobbler.com/2.0/"
+
+CALENDAR_PERIODS = frozenset({"thisweek", "thismonth", "thisyear"})
 
 
 @dataclass
@@ -179,6 +182,98 @@ def get_top(
     return results[:n]
 
 
+def get_calendar_range(period: str) -> tuple[int, int]:
+    today = date.today()
+    if period == "thisweek":
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=7)
+    elif period == "thismonth":
+        start = today.replace(day=1)
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    else:  # thisyear
+        start = today.replace(month=1, day=1)
+        end = start.replace(year=today.year + 1)
+    return (
+        int(datetime(start.year, start.month, start.day).timestamp()),
+        int(datetime(end.year, end.month, end.day).timestamp()),
+    )
+
+
+def get_top_calendar(
+    api_key: str,
+    user: str,
+    item_type: str,
+    n: int,
+    period: str,
+    user_agent: str = "lastfm-top/1.0 (contact: you@example.com)",
+    max_retries: int = 5,
+) -> List[Dict[str, Any]]:
+    cfg = {
+        "artists": {
+            "method": "user.getweeklyartistchart",
+            "top_key": "weeklyartistchart",
+            "item_key": "artist",
+        },
+        "tracks": {
+            "method": "user.getweeklytrackchart",
+            "top_key": "weeklytrackchart",
+            "item_key": "track",
+        },
+        "albums": {
+            "method": "user.getweeklyalbumchart",
+            "top_key": "weeklyalbumchart",
+            "item_key": "album",
+        },
+    }[item_type]
+
+    from_ts, to_ts = get_calendar_range(period)
+    params = {
+        "method": cfg["method"],
+        "api_key": api_key,
+        "user": user,
+        "from": from_ts,
+        "to": to_ts,
+    }
+
+    attempt = 0
+    while True:
+        try:
+            data = call_lastfm(params, user_agent=user_agent)
+            break
+        except LastFmError as e:
+            if e.code == 29 and attempt < max_retries:
+                time.sleep(min(2**attempt, 30))
+                attempt += 1
+                continue
+            raise
+        except (requests.RequestException, ValueError) as e:
+            if attempt < max_retries:
+                time.sleep(min(2**attempt, 30))
+                attempt += 1
+                continue
+            raise RuntimeError(f"Request failed after retries: {e}") from e
+
+    items = parse_items(data, cfg["top_key"], cfg["item_key"])
+    results: List[Dict[str, Any]] = []
+    for it in items[:n]:
+        row: Dict[str, Any] = {
+            "rank": int(it.get("@attr", {}).get("rank", len(results) + 1)),
+            "name": it.get("name"),
+            "playcount": int(it.get("playcount", 0)),
+            "url": it.get("url"),
+            "mbid": it.get("mbid"),
+        }
+        if item_type in {"tracks", "albums"}:
+            artist = it.get("artist") or {}
+            row["artist"] = (
+                (artist.get("#text") or artist.get("name"))
+                if isinstance(artist, dict)
+                else artist
+            )
+        results.append(row)
+    return results
+
+
 def print_table(rows: List[Dict[str, Any]], item_type: str) -> None:
     if not rows:
         print("No results.")
@@ -223,7 +318,7 @@ def main() -> int:
     p.add_argument(
         "--period",
         default="overall",
-        choices=["overall", "7day", "1month", "3month", "6month", "12month"],
+        choices=["overall", "7day", "1month", "3month", "6month", "12month", "thisweek", "thismonth", "thisyear"],
         help="Time period (default: overall)",
     )
     p.add_argument(
@@ -257,15 +352,25 @@ def main() -> int:
         print("--n must be > 0", file=sys.stderr)
         return 2
 
-    rows = get_top(
-        api_key=args.api_key,
-        user=args.user,
-        item_type=args.type,
-        n=args.n,
-        period=args.period,
-        per_page=args.per_page,
-        user_agent=args.user_agent,
-    )
+    if args.period in CALENDAR_PERIODS:
+        rows = get_top_calendar(
+            api_key=args.api_key,
+            user=args.user,
+            item_type=args.type,
+            n=args.n,
+            period=args.period,
+            user_agent=args.user_agent,
+        )
+    else:
+        rows = get_top(
+            api_key=args.api_key,
+            user=args.user,
+            item_type=args.type,
+            n=args.n,
+            period=args.period,
+            per_page=args.per_page,
+            user_agent=args.user_agent,
+        )
 
     if args.output == "json":
         print(json.dumps(rows, indent=2, ensure_ascii=False))
