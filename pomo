@@ -28,13 +28,13 @@ def pomodoro(minutes: int, bar_width: int) -> None:
             bar = "█" * filled + "░" * (bar_width - filled)
             timer_str = format_time(remaining)
 
-            print(f"\r[{bar}] {timer_str}", end="", flush=True)
+            print(f"\r{bar} {timer_str}", end="", flush=True)
             time.sleep(0.2)
     except KeyboardInterrupt:
         print("\nTimer cancelled.")
         return
 
-    print(f"\r[{'█' * bar_width}] 00:00  ✅ Done!")
+    print(f"\r{'█' * bar_width} 00:00  ✅ Done!")
 
 
 def parse_args() -> argparse.Namespace:
