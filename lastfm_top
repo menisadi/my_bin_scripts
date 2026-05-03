@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["requests"]
+# dependencies = ["requests", "python-bidi"]
 # ///
 
 """
@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import requests
+from bidi.algorithm import get_display
 
 API_ROOT = "https://ws.audioscrobbler.com/2.0/"
 
@@ -283,15 +284,18 @@ def print_table(rows: List[Dict[str, Any]], item_type: str) -> None:
     if item_type in {"tracks", "albums"}:
         headers.insert(2, "artist")  # rank, playcount, artist, name
 
+    def cell(r: Dict[str, Any], h: str) -> str:
+        return get_display(str(r.get(h, "") or ""))
+
     col_widths = {h: len(h) for h in headers}
     for r in rows:
         for h in headers:
-            col_widths[h] = max(col_widths[h], len(str(r.get(h, ""))))
+            col_widths[h] = max(col_widths[h], len(cell(r, h)))
 
     print("  ".join(h.ljust(col_widths[h]) for h in headers))
     print("  ".join("-" * col_widths[h] for h in headers))
     for r in rows:
-        print("  ".join(str(r.get(h, "")).ljust(col_widths[h]) for h in headers))
+        print("  ".join(cell(r, h).ljust(col_widths[h]) for h in headers))
 
 
 def main() -> int:
