@@ -286,7 +286,8 @@ def analyze_game(
                                 "For lc0, use plain [bold]lc0[/bold] (not lc0-cp) in WDL mode."
                             )
                             return None, None, None, interrupted, total_plies
-                        eval_white = float(wdl.pov(chess.WHITE).wins)
+                        wdl_white = wdl.pov(chess.WHITE)
+                        eval_white = float(wdl_white.wins + wdl_white.draws * 0.5)
                     elif mode == "lichess":
                         cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
                         eval_white = cp_to_win_pct(cp)
