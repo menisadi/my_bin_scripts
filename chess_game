@@ -179,7 +179,18 @@ def cmd_move(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     if move not in board.legal_moves:
-        console.print(f"[red]Illegal move: {args.uci}[/red]")
+        piece = board.piece_at(move.from_square)
+        if (
+            move.promotion is None
+            and piece is not None
+            and piece.piece_type == chess.PAWN
+            and chess.square_rank(move.to_square) in (0, 7)
+        ):
+            options = "  ".join(args.uci + p for p in "qrbn")
+            console.print("[red]Pawn promotion requires a promotion piece. Try one of:[/red]")
+            console.print(f"  {options}")
+        else:
+            console.print(f"[red]Illegal move: {args.uci}[/red]")
         sys.exit(1)
 
     san = board.san(move)
