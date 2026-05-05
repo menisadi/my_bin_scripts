@@ -1,0 +1,265 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["rich", "python-chess"]
+# ///
+import argparse
+import sys
+from datetime import date
+from pathlib import Path
+
+import chess
+import chess.engine
+import chess.pgn
+from rich.console import Console
+from rich.text import Text
+
+console = Console()
+
+PIECES = {
+    (chess.PAWN, chess.WHITE): "♙",
+    (chess.KNIGHT, chess.WHITE): "♘",
+    (chess.BISHOP, chess.WHITE): "♗",
+    (chess.ROOK, chess.WHITE): "♖",
+    (chess.QUEEN, chess.WHITE): "♕",
+    (chess.KING, chess.WHITE): "♔",
+    (chess.PAWN, chess.BLACK): "♟",
+    (chess.KNIGHT, chess.BLACK): "♞",
+    (chess.BISHOP, chess.BLACK): "♝",
+    (chess.ROOK, chess.BLACK): "♜",
+    (chess.QUEEN, chess.BLACK): "♛",
+    (chess.KING, chess.BLACK): "♚",
+}
+
+SQ_LIGHT = "on #f0d9b5"
+SQ_DARK = "on #b58863"
+SQ_LIGHT_HL = "on #cdd26a"
+SQ_DARK_HL = "on #aaa23a"
+PIECE_WHITE = "bold #ffffff"
+PIECE_BLACK = "bold #1a1a1a"
+
+
+def draw_board(board: chess.Board, flipped: bool, last_move: chess.Move | None) -> None:
+    highlighted = {last_move.from_square, last_move.to_square} if last_move else set()
+    ranks = range(7, -1, -1) if not flipped else range(8)
+    files = range(8) if not flipped else range(7, -1, -1)
+
+    console.print()
+    for rank in ranks:
+        row = Text()
+        row.append(f" {rank + 1} ", style="bold white")
+        for file in files:
+            sq = chess.square(file, rank)
+            light = (rank + file) % 2 == 1
+            hl = sq in highlighted
+            bg = (SQ_LIGHT_HL if light else SQ_DARK_HL) if hl else (SQ_LIGHT if light else SQ_DARK)
+            piece = board.piece_at(sq)
+            if piece:
+                symbol = PIECES[(piece.piece_type, piece.color)]
+                fg = PIECE_WHITE if piece.color == chess.WHITE else PIECE_BLACK
+                row.append(f" {symbol} ", style=f"{fg} {bg}")
+            else:
+                row.append("   ", style=bg)
+        console.print(row)
+
+    file_names = "abcdefgh" if not flipped else "hgfedcba"
+    labels = Text("    ")
+    for f in file_names:
+        labels.append(f" {f} ", style="bold white")
+    console.print(labels)
+    console.print()
+
+
+def game_over_message(board: chess.Board) -> str | None:
+    if board.is_checkmate():
+        winner = "Black" if board.turn == chess.WHITE else "White"
+        return f"Checkmate! {winner} wins."
+    if board.is_stalemate():
+        return "Stalemate — draw."
+    if board.is_insufficient_material():
+        return "Draw by insufficient material."
+    if board.is_fifty_moves():
+        return "Draw by fifty-move rule."
+    if board.is_repetition(3):
+        return "Draw by threefold repetition."
+    return None
+
+
+def load_game(path: Path) -> tuple[chess.pgn.Game, chess.Board, chess.Move | None]:
+    with open(path, encoding="utf-8") as f:
+        game = chess.pgn.read_game(f)
+    if game is None:
+        console.print(f"[red]No game found in {path}[/red]")
+        sys.exit(1)
+    end_node = game.end()
+    board = end_node.board()
+    last_move = end_node.move
+    return game, board, last_move
+
+
+def save_pgn(game: chess.pgn.Game, path: Path) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        print(game, file=f)
+
+
+def print_status(board: chess.Board, last_move: chess.Move | None, flipped: bool = False) -> None:
+    draw_board(board, flipped=flipped, last_move=last_move)
+    msg = game_over_message(board)
+    if msg:
+        console.print(f"[bold green]{msg}[/bold green]")
+        outcome = board.outcome()
+        if outcome:
+            console.print(f"Result: {outcome.result()}")
+    else:
+        turn = "White" if board.turn == chess.WHITE else "Black"
+        console.print(f"Turn: [bold]{turn}[/bold]  Move: {board.fullmove_number}")
+    console.print(f"FEN: [dim]{board.fen()}[/dim]")
+
+
+def cmd_new(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    if path.exists() and not args.force:
+        console.print(f"[red]{path} already exists. Use --force to overwrite.[/red]")
+        sys.exit(1)
+
+    game = chess.pgn.Game()
+    game.headers["White"] = "Human" if args.color == "white" else "Stockfish"
+    game.headers["Black"] = "Stockfish" if args.color == "white" else "Human"
+    game.headers["Date"] = date.today().strftime("%Y.%m.%d")
+    game.headers["Result"] = "*"
+    save_pgn(game, path)
+
+    board = chess.Board()
+    console.print(f"[green]New game started. Playing as {'White' if args.color == 'white' else 'Black'}.[/green]")
+    print_status(board, last_move=None, flipped=(args.color == "black"))
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    game, board, last_move = load_game(Path(args.file))
+    flipped = game.headers.get("White") != "Human"
+    print_status(board, last_move, flipped=flipped)
+
+
+def cmd_move(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    game, board, _ = load_game(path)
+
+    over = game_over_message(board)
+    if over:
+        console.print(f"[red]Game is already over: {over}[/red]")
+        sys.exit(1)
+
+    try:
+        move = chess.Move.from_uci(args.uci)
+    except ValueError:
+        console.print(f"[red]Invalid UCI format: {args.uci!r}. Example: e2e4[/red]")
+        sys.exit(1)
+
+    if move not in board.legal_moves:
+        console.print(f"[red]Illegal move: {args.uci}[/red]")
+        sys.exit(1)
+
+    san = board.san(move)
+    node = game.end().add_variation(move)
+    if args.reason:
+        node.comment = args.reason
+    board.push(move)
+
+    over = game_over_message(board)
+    if over:
+        outcome = board.outcome()
+        if outcome:
+            game.headers["Result"] = outcome.result()
+
+    save_pgn(game, path)
+    console.print(f"Played: [bold]{san}[/bold]  ({args.uci})")
+    flipped = game.headers.get("White") != "Human"
+    print_status(board, move, flipped=flipped)
+
+
+def cmd_engine(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    game, board, _ = load_game(path)
+
+    over = game_over_message(board)
+    if over:
+        console.print(f"[red]Game is already over: {over}[/red]")
+        sys.exit(1)
+
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(args.engine)
+    except Exception as e:
+        console.print(f"[red]Cannot start engine: {e}[/red]")
+        sys.exit(1)
+
+    try:
+        result = engine.play(board, chess.engine.Limit(depth=args.depth))
+        move = result.move
+        san = board.san(move)
+        game.end().add_variation(move)
+        board.push(move)
+
+        over = game_over_message(board)
+        if over:
+            outcome = board.outcome()
+            if outcome:
+                game.headers["Result"] = outcome.result()
+
+        save_pgn(game, path)
+        console.print(f"Engine played: [bold]{san}[/bold]  ({move.uci()})")
+        flipped = game.headers.get("White") != "Human"
+        print_status(board, move, flipped=flipped)
+    finally:
+        engine.quit()
+
+
+def cmd_comment(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    game, board, _ = load_game(path)
+
+    last_node = game.end()
+    if last_node == game:
+        console.print("[red]No moves in the game yet.[/red]")
+        sys.exit(1)
+
+    new_comment = args.comment
+    if last_node.comment and not args.replace:
+        last_node.comment = f"{last_node.comment}. {new_comment}"
+    else:
+        last_node.comment = new_comment
+
+    save_pgn(game, path)
+    console.print(f"[green]Comment added to last move.[/green]")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Chess CLI — play or let an agent play against Stockfish, one move per invocation."
+    )
+    parser.add_argument("--file", default="game.pgn", help="PGN state file (default: game.pgn)")
+    parser.add_argument("--engine", default="/opt/homebrew/bin/stockfish", help="Path to Stockfish binary")
+    parser.add_argument("--depth", type=int, default=15, help="Stockfish search depth (default: 15)")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_new = sub.add_parser("new", help="Start a new game")
+    p_new.add_argument("--color", choices=["white", "black"], default="white", help="Human/agent color")
+    p_new.add_argument("--force", action="store_true", help="Overwrite an existing game file")
+
+    sub.add_parser("status", help="Show current board, FEN, and whose turn it is")
+
+    p_move = sub.add_parser("move", help="Play a move in UCI format (e.g. e2e4)")
+    p_move.add_argument("uci", help="Move in UCI format")
+    p_move.add_argument("--reason", help="Reasoning for the move (saved as PGN comment)")
+
+    sub.add_parser("engine", help="Let Stockfish play the next move")
+
+    p_comment = sub.add_parser("comment", help="Add or append a comment to the last move")
+    p_comment.add_argument("comment", help="Comment text")
+    p_comment.add_argument("--replace", action="store_true", help="Replace existing comment instead of appending")
+
+    args = parser.parse_args()
+    {"new": cmd_new, "status": cmd_status, "move": cmd_move, "engine": cmd_engine, "comment": cmd_comment}[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
