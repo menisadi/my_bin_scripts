@@ -99,12 +99,19 @@ def _populate(tree_node: TreeNode, ast_node: ast.AST, *, show_calls: bool) -> No
                 ):
                     first_line = first.value.value.strip().split("\n")[0]
                     child_node.add_leaf(
-                        Text(shorten(first_line, width=60, placeholder=" …"), style="dim italic")
+                        Text(
+                            shorten(first_line, width=60, placeholder=" …"),
+                            style="dim italic",
+                        )
                     )
 
             _populate(child_node, child, show_calls=show_calls)
 
-        elif show_calls and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
+        elif (
+            show_calls
+            and isinstance(child, ast.Expr)
+            and isinstance(child.value, ast.Call)
+        ):
             tree_node.add_leaf(Text.assemble(("→ ", "blue"), _expr(child.value)))
 
         else:
@@ -157,12 +164,12 @@ class LogicMapApp(App):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Interactive, foldable AST viewer."
-    )
+    parser = argparse.ArgumentParser(description="Interactive, foldable AST viewer.")
     parser.add_argument("path", help="path to a Python file")
     parser.add_argument(
-        "--no-calls", dest="calls", action="store_false",
+        "--no-calls",
+        dest="calls",
+        action="store_false",
         help="hide statement-level function calls (shown by default)",
     )
     args = parser.parse_args()

@@ -322,7 +322,17 @@ def main() -> int:
     p.add_argument(
         "--period",
         default="overall",
-        choices=["overall", "7day", "1month", "3month", "6month", "12month", "thisweek", "thismonth", "thisyear"],
+        choices=[
+            "overall",
+            "7day",
+            "1month",
+            "3month",
+            "6month",
+            "12month",
+            "thisweek",
+            "thismonth",
+            "thisyear",
+        ],
         help="Time period (default: overall)",
     )
     p.add_argument(

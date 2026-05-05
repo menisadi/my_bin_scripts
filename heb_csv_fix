@@ -7,7 +7,7 @@ import sys
 import re
 from typing import IO
 
-HEBREW = re.compile(r'[\u0590-\u05FF]')
+HEBREW = re.compile(r"[\u0590-\u05FF]")
 
 
 def has_hebrew(text):
@@ -22,20 +22,26 @@ def fix_csv(infile: IO[str], outfile: IO[str]) -> None:
     reader = csv.reader(infile)
     writer = csv.writer(outfile)
     for row in reader:
-        writer.writerow([reverse_hebrew_cell(cell) if has_hebrew(cell) else cell for cell in row])
+        writer.writerow(
+            [reverse_hebrew_cell(cell) if has_hebrew(cell) else cell for cell in row]
+        )
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ('-h', '--help'):
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print("Usage: heb_csv_fix [input.csv] [output.csv]")
-        print("  Reverses Hebrew-containing cells so they print in the correct direction.")
-        print("  Reads from stdin if no input file given. Writes to stdout if no output file given.")
+        print(
+            "  Reverses Hebrew-containing cells so they print in the correct direction."
+        )
+        print(
+            "  Reads from stdin if no input file given. Writes to stdout if no output file given."
+        )
         sys.exit(0)
 
     if len(sys.argv) >= 2:
-        with open(sys.argv[1], newline='', encoding='utf-8') as infile:
+        with open(sys.argv[1], newline="", encoding="utf-8") as infile:
             if len(sys.argv) >= 3:
-                with open(sys.argv[2], 'w', newline='', encoding='utf-8') as outfile:
+                with open(sys.argv[2], "w", newline="", encoding="utf-8") as outfile:
                     fix_csv(infile, outfile)
             else:
                 fix_csv(infile, sys.stdout)
@@ -43,5 +49,5 @@ def main():
         fix_csv(sys.stdin, sys.stdout)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

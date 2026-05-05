@@ -202,13 +202,23 @@ def dedupe_album_candidates(albums: list[dict]) -> list[dict]:
 
         total_playcount = existing["global_playcount"] + album["global_playcount"]
         preferred_name = (
-            album["name"] if len(album["name"]) < len(existing["name"]) else existing["name"]
+            album["name"]
+            if len(album["name"]) < len(existing["name"])
+            else existing["name"]
         )
-        preferred = album if album["global_playcount"] > existing["global_playcount"] else existing
+        preferred = (
+            album
+            if album["global_playcount"] > existing["global_playcount"]
+            else existing
+        )
         merged[key] = {
             "name": preferred_name,
             "global_playcount": total_playcount,
-            **{k: v for k, v in preferred.items() if k not in {"name", "global_playcount"}},
+            **{
+                k: v
+                for k, v in preferred.items()
+                if k not in {"name", "global_playcount"}
+            },
         }
 
     return list(merged.values())

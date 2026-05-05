@@ -43,6 +43,7 @@ RAISE_NODES = (ast.Raise,)
 
 class _Opts(TypedDict):
     """Rendering options threaded through the recursive helpers."""
+
     max_depth: int
     max_len: int
     show_lineno: bool
@@ -150,7 +151,11 @@ def _add_stmt_list(
                 _label(stmt, max_len=opts["max_len"], show_lineno=opts["show_lineno"])
             )
             _add_children(child_branch, stmt, nodes, opts, depth=depth + 1)
-        elif opts["include_calls"] and isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        elif (
+            opts["include_calls"]
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+        ):
             branch.add(_call_label(stmt, opts["max_len"], opts["show_lineno"]))
         else:
             _add_children(branch, stmt, nodes, opts, depth=depth)
@@ -185,18 +190,24 @@ def _add_children(
             name = f" as {h.name}" if getattr(h, "name", None) else ""
             label = "[magenta]except[/]" + (f" {exc}{name}" if exc or name else "")
             exc_branch = branch.add(
-                _with_lineno_text(label, getattr(h, "lineno", None), opts["show_lineno"])
+                _with_lineno_text(
+                    label, getattr(h, "lineno", None), opts["show_lineno"]
+                )
             )
             _add_stmt_list(exc_branch, h.body, nodes, opts, depth=depth)
 
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"]))
+            else_branch = branch.add(
+                _with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"])
+            )
             _add_stmt_list(else_branch, node.orelse, nodes, opts, depth=depth)
 
         if node.finalbody:
             ln = getattr(node.finalbody[0], "lineno", None)
-            fin_branch = branch.add(_with_lineno_text("[magenta]finally[/]", ln, opts["show_lineno"]))
+            fin_branch = branch.add(
+                _with_lineno_text("[magenta]finally[/]", ln, opts["show_lineno"])
+            )
             _add_stmt_list(fin_branch, node.finalbody, nodes, opts, depth=depth)
         return
 
@@ -205,7 +216,9 @@ def _add_children(
         _add_stmt_list(branch, node.body, nodes, opts, depth=depth)
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"]))
+            else_branch = branch.add(
+                _with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"])
+            )
             _add_stmt_list(else_branch, node.orelse, nodes, opts, depth=depth)
         return
 
@@ -214,7 +227,9 @@ def _add_children(
         _add_stmt_list(branch, node.body, nodes, opts, depth=depth)
         if node.orelse:
             ln = getattr(node.orelse[0], "lineno", None)
-            else_branch = branch.add(_with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"]))
+            else_branch = branch.add(
+                _with_lineno_text("[magenta]else[/]", ln, opts["show_lineno"])
+            )
             _add_stmt_list(else_branch, node.orelse, nodes, opts, depth=depth)
         return
 
@@ -225,7 +240,11 @@ def _add_children(
                 _label(child, max_len=opts["max_len"], show_lineno=opts["show_lineno"])
             )
             _add_children(child_branch, child, nodes, opts, depth=depth + 1)
-        elif opts["include_calls"] and isinstance(child, ast.Expr) and isinstance(child.value, ast.Call):
+        elif (
+            opts["include_calls"]
+            and isinstance(child, ast.Expr)
+            and isinstance(child.value, ast.Call)
+        ):
             branch.add(_call_label(child, opts["max_len"], opts["show_lineno"]))
         else:
             _add_children(branch, child, nodes, opts, depth=depth)
@@ -278,25 +297,36 @@ if __name__ == "__main__":
     )
     parser.add_argument("path", help="path to a Python file")
     parser.add_argument(
-        "-x", "--exits", action="store_true",
+        "-x",
+        "--exits",
+        action="store_true",
         help="include exit points: return/break/continue",
     )
     parser.add_argument(
         "-R", "--raises", action="store_true", help="include raise statements"
     )
     parser.add_argument(
-        "-c", "--calls", action="store_true",
+        "-c",
+        "--calls",
+        action="store_true",
         help="include statement-level function calls (shown as → call)",
     )
     parser.add_argument(
         "-n", "--lineno", action="store_true", help="append line numbers like (L42)"
     )
     parser.add_argument(
-        "-m", "--max-expr-len", type=int, default=60,
+        "-m",
+        "--max-expr-len",
+        type=int,
+        default=60,
         help="truncate expressions to this width (default: 60)",
     )
     parser.add_argument(
-        "-d", "--depth", type=int, default=0, metavar="N",
+        "-d",
+        "--depth",
+        type=int,
+        default=0,
+        metavar="N",
         help="limit tree to N levels deep (0 = unlimited)",
     )
     args = parser.parse_args()

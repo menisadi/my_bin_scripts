@@ -39,8 +39,8 @@ BLUNDER_THRESHOLD_CPL = 300
 # --- WDL classification thresholds (per-mille win-probability loss, out of 1000) ---
 LICHESS_START_WIN_WHITE = 530  # ~53% win probability for White at move 0
 INACCURACY_THRESHOLD_WDL = 20  # 2%
-MISTAKE_THRESHOLD_WDL = 50     # 5%
-BLUNDER_THRESHOLD_WDL = 100    # 10%
+MISTAKE_THRESHOLD_WDL = 50  # 5%
+BLUNDER_THRESHOLD_WDL = 100  # 10%
 
 # --- Lichess accuracy mode ---
 # Win% formula: calibrated on ~2300-rated human games
@@ -51,9 +51,9 @@ LICHESS_ACC_A = 103.1668
 LICHESS_ACC_B = 0.04354
 LICHESS_ACC_C = 3.1669
 # Classification thresholds in win% loss (0-100 scale)
-INACCURACY_THRESHOLD_LICHESS = 2.0   # 2% win prob loss
-MISTAKE_THRESHOLD_LICHESS = 5.0      # 5%
-BLUNDER_THRESHOLD_LICHESS = 10.0     # 10%
+INACCURACY_THRESHOLD_LICHESS = 2.0  # 2% win prob loss
+MISTAKE_THRESHOLD_LICHESS = 5.0  # 5%
+BLUNDER_THRESHOLD_LICHESS = 10.0  # 10%
 
 
 def cp_to_win_pct(cp: float) -> float:
@@ -107,7 +107,9 @@ def print_eval_bar(
     }
     title = titles.get(mode, "Evaluation bar (White POV)")
 
-    usable_width = max(10, int(wrap_width)) if wrap_width else max(10, console.width - 2)
+    usable_width = (
+        max(10, int(wrap_width)) if wrap_width else max(10, console.width - 2)
+    )
     block_char = " "
     lines: list[Text] = []
 
@@ -234,13 +236,19 @@ def analyze_game(
                 f"[bold white]{game.headers.get('White', 'Unknown')}[/bold white] vs "
                 f"[bold white]{game.headers.get('Black', 'Unknown')}[/bold white]\n"
                 f"[cyan]Result:[/cyan] [bold yellow]{game.headers.get('Result', '*')}[/bold yellow] | "
-                + (f"[cyan]Nodes:[/cyan] {nodes}" if nodes is not None else f"[cyan]Depth:[/cyan] {depth}")
+                + (
+                    f"[cyan]Nodes:[/cyan] {nodes}"
+                    if nodes is not None
+                    else f"[cyan]Depth:[/cyan] {depth}"
+                )
                 + f" | [cyan]Engine:[/cyan] {Path(engine_path).name}"
                 + f" | [cyan]Mode:[/cyan] {mode.upper()}"
             )
             console.print(
                 Panel(
-                    header_info, title="[bold blue]Chess Analysis[/bold blue]", expand=False
+                    header_info,
+                    title="[bold blue]Chess Analysis[/bold blue]",
+                    expand=False,
                 )
             )
 
@@ -274,7 +282,11 @@ def analyze_game(
                     mover = board.turn
                     board.push(move)
 
-                    limit = chess.engine.Limit(nodes=nodes) if nodes is not None else chess.engine.Limit(depth=depth)
+                    limit = (
+                        chess.engine.Limit(nodes=nodes)
+                        if nodes is not None
+                        else chess.engine.Limit(depth=depth)
+                    )
                     info = engine.analyse(board, limit)
 
                     if mode == "wdl":
@@ -292,7 +304,9 @@ def analyze_game(
                         cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
                         eval_white = cp_to_win_pct(cp)
                     else:  # cpl
-                        eval_white = float(score_to_capped_cp(info["score"], pov=chess.WHITE))
+                        eval_white = float(
+                            score_to_capped_cp(info["score"], pov=chess.WHITE)
+                        )
 
                     if evals_white is not None:
                         evals_white.append(eval_white)
@@ -399,7 +413,9 @@ def print_report(
 
     console.print(f"\n[dim]{summary}[/dim]")
     if mode == "lichess":
-        console.print("[dim]Note: Avg Accuracy is a plain move average; Lichess uses volatility weighting.[/dim]")
+        console.print(
+            "[dim]Note: Avg Accuracy is a plain move average; Lichess uses volatility weighting.[/dim]"
+        )
     console.print()
 
 
@@ -408,9 +424,7 @@ if __name__ == "__main__":
         description="Analyze a PGN file using a UCI engine (CPL, WDL, or Lichess accuracy mode)."
     )
     parser.add_argument("pgn", help="Path to the PGN file")
-    parser.add_argument(
-        "--engine", default="stockfish", help="Path to engine binary"
-    )
+    parser.add_argument("--engine", default="stockfish", help="Path to engine binary")
     parser.add_argument(
         "--mode",
         choices=["cpl", "wdl", "lichess"],
@@ -427,7 +441,10 @@ if __name__ == "__main__":
         "--depth", type=int, default=14, help="Analysis depth (higher = slower)"
     )
     parser.add_argument(
-        "--nodes", type=int, default=None, help="Node limit per move (overrides --depth)"
+        "--nodes",
+        type=int,
+        default=None,
+        help="Node limit per move (overrides --depth)",
     )
     parser.add_argument(
         "--threads", type=int, default=None, help="Engine Threads option (optional)"
@@ -504,7 +521,9 @@ if __name__ == "__main__":
 
     if results:
         if interrupted:
-            console.print("\n[yellow]Analysis interrupted. Showing partial results.[/yellow]")
+            console.print(
+                "\n[yellow]Analysis interrupted. Showing partial results.[/yellow]"
+            )
         print_report(
             results,
             headers,
