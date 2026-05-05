@@ -130,6 +130,10 @@ def _flipped(game: chess.pgn.Game) -> bool:
     return game.headers.get("White") == "Stockfish"
 
 
+def _player_color(game: chess.pgn.Game) -> chess.Color:
+    return chess.BLACK if game.headers.get("White") == "Stockfish" else chess.WHITE
+
+
 def cmd_new(args: argparse.Namespace) -> None:
     path = Path(args.file)
     if path.exists() and not args.force:
@@ -162,6 +166,10 @@ def cmd_move(args: argparse.Namespace) -> None:
     over = game_over_message(board)
     if over:
         console.print(f"[red]Game is already over: {over}[/red]")
+        sys.exit(1)
+
+    if board.turn != _player_color(game):
+        console.print("[red]Not your turn — Stockfish to move. Run `engine` to let it play.[/red]")
         sys.exit(1)
 
     try:
@@ -198,6 +206,10 @@ def cmd_engine(args: argparse.Namespace) -> None:
     over = game_over_message(board)
     if over:
         console.print(f"[red]Game is already over: {over}[/red]")
+        sys.exit(1)
+
+    if board.turn == _player_color(game):
+        console.print("[red]Not Stockfish's turn — use `move` to play your move.[/red]")
         sys.exit(1)
 
     try:
