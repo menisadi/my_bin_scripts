@@ -126,6 +126,10 @@ def print_status(
     console.print(f"FEN: [dim]{board.fen()}[/dim]")
 
 
+def _flipped(game: chess.pgn.Game) -> bool:
+    return game.headers.get("White") == "Stockfish"
+
+
 def cmd_new(args: argparse.Namespace) -> None:
     path = Path(args.file)
     if path.exists() and not args.force:
@@ -133,23 +137,22 @@ def cmd_new(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     game = chess.pgn.Game()
-    game.headers["White"] = "Human" if args.color == "white" else "Stockfish"
-    game.headers["Black"] = "Stockfish" if args.color == "white" else "Human"
+    game.headers["White"] = args.name if args.color == "white" else "Stockfish"
+    game.headers["Black"] = "Stockfish" if args.color == "white" else args.name
     game.headers["Date"] = date.today().strftime("%Y.%m.%d")
     game.headers["Result"] = "*"
     save_pgn(game, path)
 
     board = chess.Board()
     console.print(
-        f"[green]New game started. Playing as {'White' if args.color == 'white' else 'Black'}.[/green]"
+        f"[green]New game started. Playing as {args.name} ({'White' if args.color == 'white' else 'Black'}).[/green]"
     )
     print_status(board, last_move=None, flipped=(args.color == "black"))
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     game, board, last_move = load_game(Path(args.file))
-    flipped = game.headers.get("White") != "Human"
-    print_status(board, last_move, flipped=flipped)
+    print_status(board, last_move, flipped=_flipped(game))
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -185,8 +188,7 @@ def cmd_move(args: argparse.Namespace) -> None:
 
     save_pgn(game, path)
     console.print(f"Played: [bold]{san}[/bold]  ({args.uci})")
-    flipped = game.headers.get("White") != "Human"
-    print_status(board, move, flipped=flipped)
+    print_status(board, move, flipped=_flipped(game))
 
 
 def cmd_engine(args: argparse.Namespace) -> None:
@@ -219,8 +221,7 @@ def cmd_engine(args: argparse.Namespace) -> None:
 
         save_pgn(game, path)
         console.print(f"Engine played: [bold]{san}[/bold]  ({move.uci()})")
-        flipped = game.headers.get("White") != "Human"
-        print_status(board, move, flipped=flipped)
+        print_status(board, move, flipped=_flipped(game))
     finally:
         engine.quit()
 
@@ -274,6 +275,7 @@ def main() -> None:
     p_new.add_argument(
         "--color", choices=["white", "black"], default="white", help="Human/agent color"
     )
+    p_new.add_argument("--name", default="Player", help="Player name for PGN headers")
     p_new.add_argument(
         "--force", action="store_true", help="Overwrite an existing game file"
     )
