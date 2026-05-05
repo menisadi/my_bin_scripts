@@ -172,7 +172,9 @@ def cmd_move(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     if board.turn != _player_color(game):
-        console.print("[red]Not your turn — Stockfish to move. Run `engine` to let it play.[/red]")
+        console.print(
+            "[red]Not your turn — Stockfish to move. Run `engine` to let it play.[/red]"
+        )
         sys.exit(1)
 
     try:
@@ -190,7 +192,9 @@ def cmd_move(args: argparse.Namespace) -> None:
             and chess.square_rank(move.to_square) in (0, 7)
         ):
             options = "  ".join(args.uci + p for p in "qrbn")
-            console.print("[red]Pawn promotion requires a promotion piece. Try one of:[/red]")
+            console.print(
+                "[red]Pawn promotion requires a promotion piece. Try one of:[/red]"
+            )
             console.print(f"  {options}")
         else:
             console.print(f"[red]Illegal move: {args.uci}[/red]")
