@@ -244,6 +244,22 @@ def cmd_comment(args: argparse.Namespace) -> None:
     console.print("[green]Comment added to last move.[/green]")
 
 
+def cmd_legal_moves(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    game, board, _ = load_game(path)
+
+    over = game_over_message(board)
+    if over:
+        console.print(f"[red]Game is already over: {over}[/red]")
+        sys.exit(1)
+
+    moves = sorted(board.legal_moves, key=lambda m: board.san(m))
+    console.print(f"[bold]Legal moves ({len(moves)}):[/bold]")
+    for move in moves:
+        san = board.san(move)
+        console.print(f"  {move.uci():6} {san}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Chess CLI — play or let an agent play against Stockfish, one move per invocation."
@@ -290,6 +306,8 @@ def main() -> None:
         help="Replace existing comment instead of appending",
     )
 
+    sub.add_parser("legal-moves", help="List all legal moves in the current position")
+
     args = parser.parse_args()
     {
         "new": cmd_new,
@@ -297,6 +315,7 @@ def main() -> None:
         "move": cmd_move,
         "engine": cmd_engine,
         "comment": cmd_comment,
+        "legal-moves": cmd_legal_moves,
     }[args.command](args)
 
 
