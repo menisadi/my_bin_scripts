@@ -282,6 +282,10 @@ def analyze_game(
                     mover = board.turn
                     board.push(move)
 
+                    if board.is_game_over():
+                        progress.update(task, advance=1)
+                        break
+
                     limit = (
                         chess.engine.Limit(nodes=nodes)
                         if nodes is not None
