@@ -3,6 +3,7 @@
 # dependencies = ["rich", "python-chess"]
 # ///
 import argparse
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,8 @@ from rich.console import Console
 from rich.text import Text
 
 console = Console()
+
+DEFAULT_ENGINE = shutil.which("stockfish")
 
 PIECES = {
     (chess.PAWN, chess.WHITE): "♙",
@@ -223,6 +226,13 @@ def cmd_engine(args: argparse.Namespace) -> None:
         console.print("[red]Not Stockfish's turn — use `move` to play your move.[/red]")
         sys.exit(1)
 
+    if args.engine is None:
+        console.print(
+            "[red]Stockfish not found on PATH. Install it (e.g. `brew install stockfish`) "
+            "or pass --engine /path/to/stockfish.[/red]"
+        )
+        sys.exit(1)
+
     try:
         engine = chess.engine.SimpleEngine.popen_uci(args.engine)
     except Exception as e:
@@ -314,7 +324,7 @@ def main() -> None:
     p_engine = sub.add_parser("engine", help="Let Stockfish play the next move")
     p_engine.add_argument(
         "--engine",
-        default="/opt/homebrew/bin/stockfish",
+        default=DEFAULT_ENGINE,
         help="Path to Stockfish binary",
     )
     p_engine.add_argument(
