@@ -29,3 +29,5 @@ curl -s 'wttr.in/{Yeruham,Tel+Aviv,Ein+Hacarmel,Chicago,Baltimore}?format=%l:+%c
       "$(gum style --faint --foreground 244 "⏰")" \
       "$(gum style --faint --foreground 244 "$time_p")"
   done
+
+# vim: ft=zsh

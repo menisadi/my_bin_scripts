@@ -21,3 +21,5 @@ else
   echo "Could not extract content from: $url" >&2
   exit 1
 fi
+
+# vim: ft=zsh

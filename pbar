@@ -48,3 +48,5 @@ ping -i "$interval" "$host" 2>/dev/null | awk -v G="$G" -v Y="$Y" -v O="$O" -v R
     printf L loss RESET; fflush(); next
   }
 '
+
+# vim: ft=bash

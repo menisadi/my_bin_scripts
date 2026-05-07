@@ -8,3 +8,5 @@ for file in "$@"; do
          -q:a 2 \
          "${file%.*}.mp3"
 done
+
+# vim: ft=bash

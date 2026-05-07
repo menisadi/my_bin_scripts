@@ -57,3 +57,5 @@ if [[ -z "$exclude" ]]; then
 else
   /usr/bin/find "$path" -type d -name "$exclude" -prune -o -type f -size +"$threshold"M
 fi
+
+# vim: ft=bash

@@ -22,3 +22,5 @@ awk -v n="$n" '
   g==n {print}
   g>n {exit}
 ' "$file"
+
+# vim: ft=zsh

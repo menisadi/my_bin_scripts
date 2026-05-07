@@ -60,3 +60,5 @@ fi
 printf '%s\n' "$csv" | awk -F',' 'NR>1 {r+=$3; t+=$4} END {printf "Branch total: %d/%d LOC read (%.1f%%)\n", r, t, (t>0 ? r/t*100 : 0)}'
 printf '\n'
 printf '%s\n' "$csv" | awk -F',' 'BEGIN{OFS=","} NR==1{print $0,"pct"; next} {printf "%s,%.0f%%\n", $0, ($4>0 ? ($3/$4)*100 : 0)}' | qsv table
+
+# vim: ft=zsh
