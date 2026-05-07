@@ -243,6 +243,14 @@ def cmd_engine(args: argparse.Namespace) -> None:
         console.print(f"[red]Cannot start engine: {e}[/red]")
         sys.exit(1)
 
+    if args.skill < 20:
+        if "Skill Level" in engine.options:
+            engine.configure({"Skill Level": args.skill})
+        else:
+            console.print(
+                "[yellow]Warning: this engine does not support Skill Level — playing at full strength.[/yellow]"
+            )
+
     try:
         result = engine.play(board, chess.engine.Limit(depth=args.depth))
         move = result.move
@@ -333,6 +341,13 @@ def main() -> None:
     )
     p_engine.add_argument(
         "--depth", type=int, default=15, help="Stockfish search depth (default: 15)"
+    )
+    p_engine.add_argument(
+        "--skill",
+        type=int,
+        default=20,
+        metavar="0-20",
+        help="Engine skill level 0 (weakest) to 20 (strongest, default)",
     )
 
     p_comment = sub.add_parser(
