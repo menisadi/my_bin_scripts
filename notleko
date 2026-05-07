@@ -2,7 +2,22 @@
 # /// script
 # dependencies = ["rich", "python-chess"]
 # ///
+"""
+notleko — stateless chess CLI for LLM agents playing against Stockfish.
+
+Agent contract
+--------------
+- One move per invocation; the PGN file is the sole source of state between turns.
+- Exit codes: 0 on success, 1 on error (illegal move, wrong turn, game already over).
+- Typical agent loop:
+    1. status --json   → inspect position, legal moves, and whose turn it is
+    2. move <uci> --reason "..."  → play your move (when agent_color == turn)
+    3. engine          → let Stockfish reply
+    4. repeat from 1 until result != "*"
+"""
+
 import argparse
+import json
 import shutil
 import sys
 from datetime import date
@@ -133,7 +148,7 @@ def _flipped(game: chess.pgn.Game) -> bool:
     return game.headers.get("White") == "Stockfish"
 
 
-def _player_color(game: chess.pgn.Game) -> chess.Color:
+def _agent_color(game: chess.pgn.Game) -> chess.Color:
     return chess.BLACK if game.headers.get("White") == "Stockfish" else chess.WHITE
 
 
@@ -160,6 +175,27 @@ def cmd_new(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     game, board, last_move = load_game(Path(args.file))
+
+    if args.json:
+        agent_col = _agent_color(game)
+        legal = sorted(board.legal_moves, key=lambda m: board.san(m))
+        print(
+            json.dumps(
+                {
+                    "fen": board.fen(),
+                    "turn": "white" if board.turn == chess.WHITE else "black",
+                    "fullmove": board.fullmove_number,
+                    "last_move": last_move.uci() if last_move else None,
+                    "legal_moves": [{"uci": m.uci(), "san": board.san(m)} for m in legal],
+                    "result": game.headers.get("Result", "*"),
+                    "illegal_attempts": int(game.headers.get("IllegalAttempts", "0")),
+                    "game_over_reason": game_over_message(board),
+                    "agent_color": "white" if agent_col == chess.WHITE else "black",
+                }
+            )
+        )
+        return
+
     print_status(board, last_move, flipped=_flipped(game))
     count = int(game.headers.get("IllegalAttempts", "0"))
     if count:
@@ -175,7 +211,7 @@ def cmd_move(args: argparse.Namespace) -> None:
         console.print(f"[red]Game is already over: {over}[/red]")
         sys.exit(1)
 
-    if board.turn != _player_color(game):
+    if board.turn != _agent_color(game):
         console.print(
             "[red]Not your turn — Stockfish to move. Run `engine` to let it play.[/red]"
         )
@@ -233,7 +269,7 @@ def cmd_engine(args: argparse.Namespace) -> None:
         console.print(f"[red]Game is already over: {over}[/red]")
         sys.exit(1)
 
-    if board.turn == _player_color(game):
+    if board.turn == _agent_color(game):
         console.print("[red]Not Stockfish's turn — use `move` to play your move.[/red]")
         sys.exit(1)
 
@@ -319,7 +355,7 @@ def cmd_resign(args: argparse.Namespace) -> None:
         else:
             node.comment = new_comment
 
-    player = _player_color(game)
+    player = _agent_color(game)
     game.headers["Result"] = "0-1" if player == chess.WHITE else "1-0"
     save_pgn(game, path)
     console.print("[yellow]You resigned. Better luck next time.[/yellow]")
@@ -355,12 +391,17 @@ def main() -> None:
     p_new.add_argument(
         "--color", choices=["white", "black"], default="white", help="Human/agent color"
     )
-    p_new.add_argument("--name", default="Player", help="Player name for PGN headers")
+    p_new.add_argument("--name", default="Agent", help="Agent name for PGN headers")
     p_new.add_argument(
         "--force", action="store_true", help="Overwrite an existing game file"
     )
 
-    sub.add_parser("status", help="Show current board, FEN, and whose turn it is")
+    p_status = sub.add_parser("status", help="Show current board, FEN, and whose turn it is")
+    p_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON (fen, turn, legal_moves, agent_color, …)",
+    )
 
     p_move = sub.add_parser("move", help="Play a move in UCI format (e.g. e2e4)")
     p_move.add_argument("uci", help="Move in UCI format")
