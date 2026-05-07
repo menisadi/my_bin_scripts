@@ -148,6 +148,7 @@ def cmd_new(args: argparse.Namespace) -> None:
     game.headers["Black"] = "Stockfish" if args.color == "white" else args.name
     game.headers["Date"] = date.today().strftime("%Y.%m.%d")
     game.headers["Result"] = "*"
+    game.headers["IllegalAttempts"] = "0"
     save_pgn(game, path)
 
     board = chess.Board()
@@ -160,6 +161,9 @@ def cmd_new(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     game, board, last_move = load_game(Path(args.file))
     print_status(board, last_move, flipped=_flipped(game))
+    count = int(game.headers.get("IllegalAttempts", "0"))
+    if count:
+        console.print(f"Illegal move attempts: [bold red]{count}[/bold red]")
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -184,6 +188,9 @@ def cmd_move(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     if move not in board.legal_moves:
+        count = int(game.headers.get("IllegalAttempts", "0")) + 1
+        game.headers["IllegalAttempts"] = str(count)
+        save_pgn(game, path)
         piece = board.piece_at(move.from_square)
         if (
             move.promotion is None
