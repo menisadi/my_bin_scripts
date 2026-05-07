@@ -297,6 +297,34 @@ def cmd_comment(args: argparse.Namespace) -> None:
     console.print("[green]Comment added to last move.[/green]")
 
 
+def cmd_resign(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    game, board, last_move = load_game(path)
+
+    if game.headers.get("Result", "*") != "*":
+        console.print(f"[red]Game is already over: {game.headers['Result']}[/red]")
+        sys.exit(1)
+    over = game_over_message(board)
+    if over:
+        console.print(f"[red]Game is already over: {over}[/red]")
+        sys.exit(1)
+
+    if args.comment:
+        node = game.end()
+        new_comment = _sanitize_comment(args.comment)
+        if node == game:
+            game.comment = new_comment
+        elif node.comment:
+            node.comment = f"{node.comment}. {new_comment}"
+        else:
+            node.comment = new_comment
+
+    player = _player_color(game)
+    game.headers["Result"] = "0-1" if player == chess.WHITE else "1-0"
+    save_pgn(game, path)
+    console.print("[yellow]You resigned. Better luck next time.[/yellow]")
+
+
 def cmd_legal_moves(args: argparse.Namespace) -> None:
     path = Path(args.file)
     game, board, _ = load_game(path)
@@ -367,6 +395,9 @@ def main() -> None:
         help="Replace existing comment instead of appending",
     )
 
+    p_resign = sub.add_parser("resign", help="Resign the game")
+    p_resign.add_argument("--comment", help="Optional comment appended to the last move")
+
     sub.add_parser("legal-moves", help="List all legal moves in the current position")
 
     args = parser.parse_args()
@@ -376,6 +407,7 @@ def main() -> None:
         "move": cmd_move,
         "engine": cmd_engine,
         "comment": cmd_comment,
+        "resign": cmd_resign,
         "legal-moves": cmd_legal_moves,
     }[args.command](args)
 
