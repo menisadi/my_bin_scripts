@@ -1,0 +1,270 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["typer", "rich", "requests"]
+# ///
+"""
+Build a playlist from an artist's similar artists' top tracks.
+
+Usage:
+    similar_playlist "Radiohead"
+    similar_playlist "Radiohead" --include-self --n-artists 5 --n-tracks 5
+    similar_playlist "Radiohead" --output json
+
+Requires env var: LASTFM_API_KEY
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import sys
+import time
+import re
+from typing import Any, Optional
+
+import requests
+import typer
+from rich.console import Console
+from rich.table import Table
+
+API_ROOT = "https://ws.audioscrobbler.com/2.0/"
+
+_TRACK_NOISE = [
+    "remaster(?:ed)?",
+    "version",
+    "edit",
+    r"live\b",
+    "acoustic",
+    "demo",
+    "bonus",
+    "single",
+    "mix",
+    "radio",
+    r"\d{4}",  # bare year
+]
+
+
+def normalize_track_name(name: str) -> str:
+    kw = "(?:" + "|".join(_TRACK_NOISE) + ")"
+    norm = re.sub(rf"\s*[-–—]\s*.*?{kw}.*$", "", name, flags=re.IGNORECASE)
+    norm = re.sub(rf"\s*[(\[].*?{kw}.*?[)\]]", "", norm, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", norm).strip()
+
+
+def dedupe_tracks(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: dict[str, dict[str, Any]] = {}
+    for t in tracks:
+        key = normalize_track_name(t["track"]).lower()
+        if key not in seen or t["playcount"] > seen[key]["playcount"]:
+            seen[key] = t
+    return list(seen.values())
+
+
+app = typer.Typer(help="Build a playlist from similar artists' top tracks.")
+console = Console()
+
+
+def call_lastfm(
+    params: dict[str, Any],
+    user_agent: str,
+    max_retries: int = 5,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    # Last.fm double-decodes query strings, so pre-escape literal '+' in values
+    # as '%2B'; requests will then encode '%' → '%25', giving '%252B' in the
+    # URL, which survives both decode passes as a literal '+'.
+    params = {
+        k: v.replace("+", "%2B") if isinstance(v, str) else v
+        for k, v in params.items()
+    }
+    params["format"] = "json"
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(
+                API_ROOT,
+                params=params,
+                headers={"User-Agent": user_agent},
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict) and "error" in data:
+                code = int(data["error"])
+                msg = str(data.get("message", ""))
+                if code == 29 and attempt < max_retries:
+                    time.sleep(min(2**attempt, 30))
+                    continue
+                raise RuntimeError(f"Last.fm error {code}: {msg}")
+            return data
+        except (requests.RequestException, ValueError) as e:
+            if attempt < max_retries:
+                time.sleep(min(2**attempt, 30))
+                continue
+            raise RuntimeError(f"Request failed after retries: {e}") from e
+    raise RuntimeError("Unreachable")
+
+
+@app.command()
+def main(
+    artist: str = typer.Argument(help="Seed artist name"),
+    n_artists: int = typer.Option(
+        10, "--n-artists", "-a", help="Number of similar artists to fetch"
+    ),
+    n_tracks: int = typer.Option(3, "--n-tracks", "-t", help="Tracks per artist"),
+    min_match: float = typer.Option(
+        0.0, "--min-match", "-m", help="Minimum similarity score (0–1)"
+    ),
+    include_self: bool = typer.Option(
+        False,
+        "--include-self",
+        "-s",
+        help="Also include top tracks from the seed artist",
+    ),
+    output: str = typer.Option(
+        "table", "--output", "-o", help="Output format: table, json, csv"
+    ),
+    user_agent: str = typer.Option(
+        "similar-playlist/1.0", "--user-agent", help="HTTP User-Agent header"
+    ),
+):
+    """Build a playlist from an artist's similar artists' top tracks."""
+    api_key = os.environ.get("LASTFM_API_KEY")
+    if not api_key:
+        console.print("[red]Missing LASTFM_API_KEY environment variable.[/red]")
+        raise typer.Exit(2)
+
+    if output not in {"table", "json", "csv"}:
+        console.print(
+            f"[red]Invalid output format '{output}'. Use table, json, or csv.[/red]"
+        )
+        raise typer.Exit(2)
+
+    def get_similar(a: str, limit: int) -> list[dict[str, Any]]:
+        data = call_lastfm(
+            {
+                "method": "artist.getsimilar",
+                "artist": a,
+                "limit": limit,
+                "api_key": api_key,
+            },
+            user_agent=user_agent,
+        )
+        items = data.get("similarartists", {}).get("artist") or []
+        if not isinstance(items, list):
+            items = [items]
+        return [{"name": x["name"], "match": float(x.get("match", 0))} for x in items]
+
+    def get_tracks(a: str, limit: int, match: float) -> list[dict[str, Any]]:
+        data = call_lastfm(
+            {
+                "method": "artist.gettoptracks",
+                "artist": a,
+                "limit": limit,
+                "api_key": api_key,
+            },
+            user_agent=user_agent,
+        )
+        items = data.get("toptracks", {}).get("track") or []
+        if not isinstance(items, list):
+            items = [items]
+        return [
+            {
+                "artist": a,
+                "match": match,
+                "track": t.get("name", ""),
+                "playcount": int(t.get("playcount", 0)),
+            }
+            for t in items
+        ]
+
+    playlist: list[dict[str, Any]] = []
+
+    if include_self:
+        with console.status(f"Fetching top tracks for [bold]{artist}[/bold]..."):
+            seed_tracks = dedupe_tracks(get_tracks(artist, n_tracks * 2, 1.0))[
+                :n_tracks
+            ]
+        playlist.extend(seed_tracks)
+
+    with console.status(f"Fetching similar artists for [bold]{artist}[/bold]..."):
+        similar = get_similar(artist, n_artists)
+
+    similar = [s for s in similar if s["match"] >= min_match]
+
+    if not similar:
+        console.print(
+            "[yellow]No similar artists found (or all below --min-match).[/yellow]"
+        )
+        raise typer.Exit(0)
+
+    with console.status("Fetching top tracks for similar artists...") as status:
+        for i, s in enumerate(similar, 1):
+            status.update(f"[{i}/{len(similar)}] {s['name']} (match: {s['match']:.2f})")
+            tracks = dedupe_tracks(get_tracks(s["name"], n_tracks * 2, s["match"]))[
+                :n_tracks
+            ]
+            playlist.extend(tracks)
+
+    # Sort by match desc, then playcount desc
+    playlist.sort(key=lambda x: (-x["match"], -x["playcount"]))
+
+    if output == "json":
+        print(json.dumps(playlist, indent=2, ensure_ascii=False))
+    elif output == "csv":
+        w = csv.DictWriter(
+            sys.stdout, fieldnames=["artist", "match", "track", "playcount"]
+        )
+        w.writeheader()
+        w.writerows(playlist)
+    else:
+        table = Table(
+            title=f"Playlist: similar to [bold]{artist}[/bold]",
+            show_lines=False,
+            padding=(0, 1),
+        )
+        table.add_column("#", width=4, justify="right")
+        table.add_column("Artist", min_width=20)
+        table.add_column("Match", width=6, justify="right")
+        table.add_column("Track", min_width=25)
+        table.add_column("Global plays", justify="right", width=13)
+
+        for i, row in enumerate(playlist, 1):
+            match_val = row["match"]
+            is_seed = (
+                match_val == 1.0
+                and include_self
+                and row["artist"].lower() == artist.lower()
+            )
+            if is_seed:
+                match_str = "[bold]self[/bold]"
+            elif match_val >= 0.8:
+                match_str = f"[green]{match_val:.2f}[/green]"
+            elif match_val >= 0.5:
+                match_str = f"[yellow]{match_val:.2f}[/yellow]"
+            else:
+                match_str = f"[dim]{match_val:.2f}[/dim]"
+
+            artist_str = (
+                "[bold]" + row["artist"] + "[/bold]" if is_seed else row["artist"]
+            )
+
+            table.add_row(
+                str(i),
+                artist_str,
+                match_str,
+                row["track"],
+                f"{row['playcount']:,}",
+            )
+
+        console.print()
+        console.print(table)
+        source_str = f"{len(similar)} similar artists"
+        if include_self:
+            source_str += f" + {artist}"
+        console.print(f"\n  [dim]{len(playlist)} tracks from {source_str}[/dim]")
+
+
+if __name__ == "__main__":
+    app()
+# vim: ft=python
