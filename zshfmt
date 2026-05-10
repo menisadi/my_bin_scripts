@@ -8,11 +8,20 @@ file="${1:-.zsh_aliases}"
 tmp=$(mktemp /tmp/zshfmt.XXXXXX.sh)
 trap 'rm -f "$tmp"' EXIT
 
+# Step 1: patch zsh-only syntax into bash-compatible placeholders.
+# -0 makes perl slurp the whole file so the multiline pattern can match across lines.
+#   ${=var}  → ___ZSH_SPLIT_var___   (zsh word-splitting; not valid bash)
+#   " \<newline>}" → "<newline>}"     (trailing \ before closing } confuses shfmt:
+#                                      it treats } as a continuation of the command
+#                                      rather than the function's closing brace)
 perl -0pe '
   s/\$\{=([^}]+)\}/___ZSH_SPLIT_$1___/g;
   s/ \\\n\}/\n\}/g;
 ' "$file" > "$tmp"
 
+# Step 2: format the patched file as bash (closest dialect shfmt supports for zsh).
 shfmt -ln bash -w "$tmp"
 
+# Step 3: restore zsh syntax. The trailing-\ fix is not restored because shfmt
+# rewrites those pipelines to put | at the end of the line instead, which is equivalent.
 perl -0pe 's/___ZSH_SPLIT_([^_]+)___/\${=$1}/g' "$tmp" > "$file"
