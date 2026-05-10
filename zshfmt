@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run shfmt on a zsh file by patching around zsh-only syntax shfmt can't parse.
+# Handles: ${=var} (zsh word-splitting), trailing \ before closing }
+
+set -euo pipefail
+
+file="${1:-.zsh_aliases}"
+tmp=$(mktemp /tmp/zshfmt.XXXXXX.sh)
+trap 'rm -f "$tmp"' EXIT
+
+perl -0pe '
+  s/\$\{=([^}]+)\}/___ZSH_SPLIT_$1___/g;
+  s/ \\\n\}/\n\}/g;
+' "$file" > "$tmp"
+
+shfmt -ln bash -w "$tmp"
+
+perl -0pe 's/___ZSH_SPLIT_([^_]+)___/\${=$1}/g' "$tmp" > "$file"
