@@ -5,6 +5,7 @@
 import argparse
 import logging
 import math
+import statistics
 import sys
 from pathlib import Path
 
@@ -220,6 +221,8 @@ def analyze_game(
                 "inaccuracies": 0,
                 "mistakes": 0,
                 "blunders": 0,
+                "accuracy_list": [],
+                "win_pct_list": [],
             },
             chess.BLACK: {
                 "loss_total": 0.0,
@@ -228,6 +231,8 @@ def analyze_game(
                 "inaccuracies": 0,
                 "mistakes": 0,
                 "blunders": 0,
+                "accuracy_list": [],
+                "win_pct_list": [],
             },
         }
 
@@ -326,11 +331,15 @@ def analyze_game(
                     if mode == "lichess":
                         if mover == chess.WHITE:
                             accuracy = move_accuracy_pct(prev_eval_white, eval_white)
+                            win_pct_before = prev_eval_white
                         else:
                             accuracy = move_accuracy_pct(
                                 100.0 - prev_eval_white, 100.0 - eval_white
                             )
+                            win_pct_before = 100.0 - prev_eval_white
                         stats[mover]["accuracy_total"] += accuracy
+                        stats[mover]["accuracy_list"].append(accuracy)
+                        stats[mover]["win_pct_list"].append(win_pct_before)
 
                     if loss >= blunder_threshold:
                         stats[mover]["blunders"] += 1
@@ -354,6 +363,31 @@ def analyze_game(
             pass
 
 
+def compute_lichess_accuracy(accuracy_list: list[float], win_pct_list: list[float]) -> float:
+    """Approximate Lichess game accuracy: average of harmonic mean and volatility-weighted mean."""
+    n = len(accuracy_list)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return accuracy_list[0]
+
+    harmonic = n / sum(1.0 / max(a, 1.0) for a in accuracy_list)
+
+    radius = max(2, n // 5)
+    weights = []
+    for i in range(n):
+        window = win_pct_list[max(0, i - radius) : i + radius + 1]
+        weights.append(statistics.stdev(window) if len(window) >= 2 else 0.0)
+
+    total = sum(weights)
+    if total == 0.0:
+        vol_weighted = sum(accuracy_list) / n
+    else:
+        vol_weighted = sum(w * a for w, a in zip(weights, accuracy_list)) / total
+
+    return (harmonic + vol_weighted) / 2.0
+
+
 def print_report(
     stats,
     headers,
@@ -373,8 +407,8 @@ def print_report(
         table.add_column("Black", justify="center", width=10)
 
         if mode == "lichess":
-            w_acc = (w["accuracy_total"] / w["moves"]) if w["moves"] else 0.0
-            b_acc = (b["accuracy_total"] / b["moves"]) if b["moves"] else 0.0
+            w_acc = compute_lichess_accuracy(w["accuracy_list"], w["win_pct_list"])
+            b_acc = compute_lichess_accuracy(b["accuracy_list"], b["win_pct_list"])
             table.add_row("Avg Accuracy", f"{w_acc:.1f}%", f"{b_acc:.1f}%")
         elif mode == "wdl":
             w_avg = (w["loss_total"] / w["moves"]) if w["moves"] else 0.0
@@ -418,7 +452,7 @@ def print_report(
     console.print(f"\n[dim]{summary}[/dim]")
     if mode == "lichess":
         console.print(
-            "[dim]Note: Avg Accuracy is a plain move average; Lichess uses volatility weighting.[/dim]"
+            "[dim]Note: Accuracy approximates Lichess formula (harmonic mean + volatility weighting).[/dim]"
         )
     console.print()
 
