@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+echo "==> Homebrew"
+brew update && brew upgrade && brew cleanup
+
+echo "==> npm globals"
+npm update -g
+
+echo "==> uv tools"
+uv tool upgrade --all
+
+echo "==> vim (vim-plug)"
+vim -es -u ~/.vimrc -i NONE -c "PlugUpdate" -c "qa"
+
+echo "==> neovim (lazy.nvim)"
+nvim --headless "+Lazy! update" +qa
+
+echo "==> astronvim (lazy.nvim)"
+nvim -u ~/.config/astronvim/init.lua --headless "+Lazy! update" +qa
+
+echo "==> neovim/minvim (vim.pack)"
+nvim -u ~/.config/minvim/init.lua --headless -c "PackUpdate!" -c "qa"
