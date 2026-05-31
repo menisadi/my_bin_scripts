@@ -16,7 +16,7 @@ echo "==> neovim (lazy.nvim)"
 nvim --headless "+Lazy! update" +qa
 
 echo "==> astronvim (lazy.nvim)"
-nvim -u ~/.config/astronvim/init.lua --headless "+Lazy! update" +qa
+NVIM_APPNAME=astronvim nvim --headless "+Lazy! update" +qa
 
 echo "==> neovim/minvim (vim.pack)"
-nvim -u ~/.config/minvim/init.lua --headless -c "PackUpdate!" -c "qa"
+NVIM_APPNAME=minvim nvim --headless -c "PackUpdate!" -c "qa"
