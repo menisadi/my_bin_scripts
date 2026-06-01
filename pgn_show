@@ -1,0 +1,228 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["rich", "python-chess"]
+# ///
+import argparse
+import logging
+import math
+import sys
+
+import chess
+import chess.engine
+import chess.pgn
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.text import Text
+
+console = Console()
+
+logging.getLogger("chess.engine").setLevel(logging.CRITICAL)
+
+LICHESS_WIN_PCT_K = 0.00368208
+LICHESS_START_CP_WHITE = 15
+EVAL_CAP_CP = 1000
+
+INACCURACY_THRESHOLD = 2.0
+MISTAKE_THRESHOLD = 5.0
+BLUNDER_THRESHOLD = 10.0
+
+SYMBOLS: dict[str, str] = {
+    "inaccuracy": "?!",
+    "mistake": "?",
+    "blunder": "??",
+}
+RICH_STYLES: dict[str, str] = {
+    "inaccuracy": "yellow",
+    "mistake": "orange3",
+    "blunder": "bold red",
+}
+
+
+def cp_to_win_pct(cp: float) -> float:
+    return 50 + 50 * (2 / (1 + math.exp(-LICHESS_WIN_PCT_K * cp)) - 1)
+
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def score_to_capped_cp(score: chess.engine.PovScore, pov: chess.Color) -> int:
+    raw = score.pov(pov).score(mate_score=EVAL_CAP_CP)
+    if raw is None:
+        return 0
+    return int(clamp(raw, -EVAL_CAP_CP, EVAL_CAP_CP))
+
+
+def classify_loss(loss: float) -> str | None:
+    if loss >= BLUNDER_THRESHOLD:
+        return "blunder"
+    if loss >= MISTAKE_THRESHOLD:
+        return "mistake"
+    if loss >= INACCURACY_THRESHOLD:
+        return "inaccuracy"
+    return None
+
+
+def analyze_moves(
+    game: chess.pgn.Game,
+    engine_path: str,
+    depth: int,
+) -> dict[int, str]:
+    """Return a mapping of ply index (0-based) to classification."""
+    classifications: dict[int, str] = {}
+
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] Could not start engine: {e}")
+        sys.exit(1)
+
+    try:
+        total_plies = sum(1 for _ in game.mainline_moves())
+        board = game.board()
+        prev_win_pct = cp_to_win_pct(LICHESS_START_CP_WHITE)
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Analyzing...", total=total_plies)
+
+            for ply, move in enumerate(game.mainline_moves()):
+                mover = board.turn
+                board.push(move)
+
+                if board.is_game_over():
+                    progress.advance(task)
+                    break
+
+                info = engine.analyse(board, chess.engine.Limit(depth=depth))
+                cp = score_to_capped_cp(info["score"], pov=chess.WHITE)
+                win_pct = cp_to_win_pct(cp)
+
+                if mover == chess.WHITE:
+                    loss = max(0.0, prev_win_pct - win_pct)
+                else:
+                    loss = max(0.0, win_pct - prev_win_pct)
+
+                classification = classify_loss(loss)
+                if classification:
+                    classifications[ply] = classification
+
+                prev_win_pct = win_pct
+                progress.advance(task)
+    finally:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+
+    return classifications
+
+
+def render_move(san: str, classification: str | None, style: str) -> Text:
+    t = Text()
+    if classification is None:
+        t.append(san)
+        return t
+
+    rich_style = RICH_STYLES[classification]
+    symbol = SYMBOLS[classification]
+
+    if style == "color":
+        t.append(san, style=rich_style)
+    elif style == "symbols":
+        t.append(san + symbol)
+    else:  # both
+        t.append(san + symbol, style=rich_style)
+    return t
+
+
+def print_game(
+    game: chess.pgn.Game,
+    classifications: dict[int, str],
+    style: str,
+) -> None:
+    white = game.headers.get("White", "Unknown")
+    black = game.headers.get("Black", "Unknown")
+    console.print(f"[bold]{white}[/bold] vs [bold]{black}[/bold]")
+
+    board = game.board()
+    moves = list(game.mainline_moves())
+    ply = 0
+    move_num = 1
+
+    while ply < len(moves):
+        line = Text()
+        line.append(f"{move_num}. ")
+
+        white_san = board.san(moves[ply])
+        board.push(moves[ply])
+        line.append_text(render_move(white_san, classifications.get(ply), style))
+        ply += 1
+
+        if ply < len(moves):
+            line.append(" ")
+            black_san = board.san(moves[ply])
+            board.push(moves[ply])
+            line.append_text(render_move(black_san, classifications.get(ply), style))
+            ply += 1
+
+        console.print(line)
+        move_num += 1
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Print a PGN game as a readable move list with optional Stockfish annotations."
+    )
+    parser.add_argument("pgn", help="Path to the PGN file")
+    parser.add_argument(
+        "--annotate",
+        action="store_true",
+        default=False,
+        help="Annotate moves with inaccuracy/mistake/blunder using Stockfish.",
+    )
+    parser.add_argument(
+        "--style",
+        choices=["symbols", "color", "both"],
+        default="both",
+        help="Annotation style: 'symbols' (?!/??), 'color', or 'both' (default). Only used with --annotate.",
+    )
+    parser.add_argument(
+        "--engine",
+        default="stockfish",
+        help="Path to UCI engine binary (default: stockfish).",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=14,
+        help="Analysis depth per move (default: 14). Only used with --annotate.",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        with open(args.pgn, encoding="utf-8", errors="replace") as f:
+            game = chess.pgn.read_game(f)
+    except OSError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+
+    if not game:
+        console.print("[bold red]Error:[/bold red] No game found in PGN file.")
+        sys.exit(1)
+
+    classifications: dict[int, str] = {}
+    if args.annotate:
+        try:
+            classifications = analyze_moves(game, args.engine, args.depth)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Analysis interrupted.[/yellow]")
+            sys.exit(130)
+
+    print_game(game, classifications, style=args.style)
+# vim: ft=python
