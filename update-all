@@ -13,10 +13,10 @@ echo "==> vim (vim-plug)"
 vim -es -u ~/.vimrc -i NONE -c "PlugUpdate" -c "qa"
 
 echo "==> neovim (lazy.nvim)"
-nvim --headless "+Lazy! update" +qa
+NVIM_APPNAME=kvim nvim --headless "+Lazy! update" +qa
 
 echo "==> astronvim (lazy.nvim)"
 NVIM_APPNAME=astronvim nvim --headless "+Lazy! update" +qa
 
 echo "==> neovim/minvim (vim.pack)"
-NVIM_APPNAME=minvim nvim --headless -c "PackUpdate!" -c "qa"
+nvim --headless -c "PackUpdate!" -c "qa"
