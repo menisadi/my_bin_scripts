@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: pdf2html [--no-open] <input.pdf> [output.html]"
+  echo "  Converts a PDF to a readable HTML file with dark mode and font size controls."
+  exit 1
+}
+
+NO_OPEN=0
+ARGS=()
+for arg in "$@"; do
+  [[ "$arg" == "--no-open" ]] && NO_OPEN=1 || ARGS+=("$arg")
+done
+
+[[ ${#ARGS[@]} -lt 1 ]] && usage
+
+PDF="${ARGS[0]}"
+[[ ! -f "$PDF" ]] && { echo "Error: file not found: $PDF"; exit 1; }
+
+BASENAME="$(basename "$PDF" .pdf)"
+OUTDIR="$(dirname "$PDF")/.${BASENAME}_work"
+HTML="${ARGS[1]:-$(dirname "$PDF")/${BASENAME}.html}"
+
+TOOLBAR_AND_STYLES='<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<script>
+MathJax = { tex: { inlineMath: [["\\(","\\)"]], displayMath: [["\\[","\\]"]] } };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" id="MathJax-script" async></script>
+<style>
+body{font-family:Georgia,"Times New Roman",serif;font-size:17px;line-height:1.7;color:#222;background:#fafafa;margin:0;padding:0;}
+#content{max-width:780px;margin:3rem auto;padding:0 2rem 4rem;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.07);border-radius:6px;}
+h1{font-size:1.6em;margin-top:2rem;}
+h2{font-size:1.3em;margin-top:2rem;border-bottom:1px solid #eee;padding-bottom:.3em;}
+h3{font-size:1.1em;margin-top:1.8rem;}
+h4{font-size:1em;margin-top:1.5rem;font-style:italic;}
+p{margin:1em 0;}
+code{font-family:Menlo,monospace;font-size:.88em;background:#f4f4f4;padding:.1em .3em;border-radius:3px;}
+blockquote{border-left:3px solid #ccc;margin-left:0;padding-left:1.2em;color:#555;}
+a{color:#1a5276;}
+.math.display{overflow-x:auto;padding:.5em 0;}
+img{max-width:100%;height:auto;display:block;margin:1.5em auto;}
+span.smallcaps{font-variant:small-caps;}
+div.hanging-indent{margin-left:1.5em;text-indent:-1.5em;}
+ul,ol{padding-left:1.8em;}
+li{margin:.3em 0;}
+sup{font-size:.75em;}
+body.dark{color:#d4d4d4;background:#1a1a1a;}
+body.dark #content{background:#242424;box-shadow:0 2px 12px rgba(0,0,0,.4);}
+body.dark h2{border-bottom-color:#444;}
+body.dark code{background:#333;}
+body.dark blockquote{border-left-color:#555;color:#aaa;}
+body.dark a{color:#7aadcf;}
+body.dark img{filter:brightness(.85);}
+#toolbar{position:fixed;top:1.2rem;right:1.4rem;display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #ddd;border-radius:8px;padding:6px 10px;box-shadow:0 2px 8px rgba(0,0,0,.1);z-index:1000;font-family:system-ui,sans-serif;font-size:14px;}
+body.dark #toolbar{background:#242424;border-color:#444;color:#d4d4d4;}
+#toolbar button{background:none;border:1px solid #ccc;border-radius:5px;padding:3px 9px;cursor:pointer;font-size:14px;color:inherit;line-height:1.4;}
+body.dark #toolbar button{border-color:#555;}
+#toolbar button:hover{background:rgba(0,0,0,.06);}
+body.dark #toolbar button:hover{background:rgba(255,255,255,.08);}
+#font-size-label{font-size:13px;min-width:2.5em;text-align:center;opacity:.7;}
+@media print{
+  #toolbar{display:none;}
+  body{background:white!important;color:black!important;}
+  #content{max-width:none;margin:0;padding:0;box-shadow:none;border-radius:0;background:white!important;}
+}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button id="dark-toggle" title="Toggle dark mode">☾</button>
+  <span style="opacity:.3;margin:0 2px">|</span>
+  <button id="font-dec" title="Decrease font size">A−</button>
+  <span id="font-size-label">17px</span>
+  <button id="font-inc" title="Increase font size">A+</button>
+</div>
+<script>
+(function(){
+  var fs=parseInt(localStorage.getItem("fontSize")||"17");
+  var dark=localStorage.getItem("dark")==="1";
+  function applyFont(){document.body.style.fontSize=fs+"px";document.getElementById("font-size-label").textContent=fs+"px";}
+  function applyDark(){document.body.classList.toggle("dark",dark);document.getElementById("dark-toggle").textContent=dark?"☀":"☾";}
+  document.addEventListener("DOMContentLoaded",function(){
+    applyFont();applyDark();
+    document.getElementById("font-inc").addEventListener("click",function(){if(fs<28){fs++;localStorage.setItem("fontSize",fs);applyFont();}});
+    document.getElementById("font-dec").addEventListener("click",function(){if(fs>12){fs--;localStorage.setItem("fontSize",fs);applyFont();}});
+    document.getElementById("dark-toggle").addEventListener("click",function(){dark=!dark;localStorage.setItem("dark",dark?"1":"0");applyDark();});
+  });
+})();
+</script>
+<div id="content">
+$body$
+</div>
+</body>
+</html>'
+
+TEMPLATE_FILE="$(mktemp /tmp/pdf2html-template-XXXXXXXX)"
+echo "$TOOLBAR_AND_STYLES" > "$TEMPLATE_FILE"
+trap 'rm -f "$TEMPLATE_FILE"' EXIT
+
+if [[ -f "$OUTDIR/$BASENAME/$BASENAME.md" ]]; then
+  echo "→ Reusing existing Markdown (delete $OUTDIR to reconvert)"
+else
+  echo "→ Converting PDF to Markdown..."
+  marker_single "$PDF" --output_dir "$OUTDIR" --output_format markdown
+fi
+
+MD_FILE="$OUTDIR/$BASENAME/$BASENAME.md"
+MD_DIR="$(dirname "$MD_FILE")"
+HTML_DIR="$(dirname "$HTML")"
+
+[[ ! -f "$MD_FILE" ]] && { echo "Error: marker output not found at $MD_FILE"; exit 1; }
+
+echo "→ Building HTML..."
+pandoc "$MD_FILE" \
+  --standalone \
+  --mathjax \
+  --template "$TEMPLATE_FILE" \
+  --metadata title="$BASENAME" \
+  -o "$HTML"
+
+# Copy any images from the markdown dir to sit alongside the HTML
+find "$MD_DIR" -maxdepth 1 \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.gif" -o -name "*.webp" \) \
+  -exec cp {} "$HTML_DIR/" \; 2>/dev/null || true
+
+echo "→ Done: $HTML"
+[[ $NO_OPEN -eq 0 ]] && open "$HTML"

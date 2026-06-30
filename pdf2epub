@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+EBOOK_CONVERT="/Applications/calibre.app/Contents/MacOS/ebook-convert"
+
+usage() {
+  echo "Usage: pdf2epub [--no-open] <input.pdf> [output.epub]"
+  echo "  Converts a PDF to an epub with math support."
+  exit 1
+}
+
+NO_OPEN=0
+ARGS=()
+for arg in "$@"; do
+  [[ "$arg" == "--no-open" ]] && NO_OPEN=1 || ARGS+=("$arg")
+done
+
+[[ ${#ARGS[@]} -lt 1 ]] && usage
+
+PDF="${ARGS[0]}"
+[[ ! -f "$PDF" ]] && { echo "Error: file not found: $PDF"; exit 1; }
+
+BASENAME="$(basename "$PDF" .pdf)"
+OUTDIR="$(dirname "$PDF")/.${BASENAME}_work"
+EPUB="${ARGS[1]:-$(dirname "$PDF")/${BASENAME}.epub}"
+
+# Step 1: PDF → Markdown (reuse cached work dir if it exists)
+if [[ -f "$OUTDIR/$BASENAME/$BASENAME.md" ]]; then
+  echo "→ Reusing existing Markdown (delete $OUTDIR to reconvert)"
+else
+  echo "→ Converting PDF to Markdown..."
+  marker_single "$PDF" --output_dir "$OUTDIR" --output_format markdown
+fi
+
+MD_FILE="$OUTDIR/$BASENAME/$BASENAME.md"
+[[ ! -f "$MD_FILE" ]] && { echo "Error: marker output not found at $MD_FILE"; exit 1; }
+
+# Step 2: Preprocess markdown to fix common unsupported LaTeX commands
+PROCESSED_MD="$(mktemp /tmp/pdf2epub-XXXXXXXX)"
+HTML_FILE="$(mktemp /tmp/pdf2epub-XXXXXXXX)"
+trap 'rm -f "$HTML_FILE" "$PROCESSED_MD"' EXIT
+
+sed 's/\\rm /\\mathrm /g; s/\\rm{/\\mathrm{/g; s/\\bf /\\mathbf /g; s/\\bf{/\\mathbf{/g' "$MD_FILE" > "$PROCESSED_MD"
+
+echo "→ Rendering math to MathML..."
+pandoc "$PROCESSED_MD" \
+  --standalone \
+  --embed-resources \
+  --mathml \
+  --metadata title="$BASENAME" \
+  --resource-path="$(dirname "$MD_FILE"):$(dirname "$PROCESSED_MD")" \
+  -o "$HTML_FILE"
+
+# Step 3: HTML → epub (calibre handles epub structure, TOC, metadata)
+echo "→ Building epub..."
+"$EBOOK_CONVERT" "$HTML_FILE" "$EPUB" --input-format html \
+  --title "$BASENAME" \
+  --level1-toc "//h:h1" \
+  --level2-toc "//h:h2" \
+  --level3-toc "//h:h3" \
+  --chapter "//h:h1" \
+  --no-chapters-in-toc \
+  --page-breaks-before "/" \
+  --margin-top 36 \
+  --margin-bottom 36 \
+  --margin-left 36 \
+  --margin-right 36 \
+  2>&1 | grep -v "^$" | grep -Ev "^(DEBUG|WARNING: Invalid|Parsing|Resolved)"
+
+echo "→ Done: $EPUB"
+[[ $NO_OPEN -eq 0 ]] && open "$EPUB"
