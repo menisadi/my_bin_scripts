@@ -98,7 +98,7 @@ body.dark #toolbar button:hover{background:rgba(255,255,255,.08);}
   document.addEventListener("DOMContentLoaded",function(){
     applyFont();applyDark();
     document.getElementById("font-inc").addEventListener("click",function(){if(fs<28){fs++;localStorage.setItem("fontSize",fs);applyFont();}});
-    document.getElementById("font-dec").addEventListener("click",function(){if(fs>12){fs--;localStorage.setItem("fontSize",fs);applyFont();}});
+    document.getElementById("font-dec").addEventListener("click",function(){if(fs>10){fs--;localStorage.setItem("fontSize",fs);applyFont();}});
     document.getElementById("dark-toggle").addEventListener("click",function(){dark=!dark;localStorage.setItem("dark",dark?"1":"0");applyDark();});
   });
 })();
