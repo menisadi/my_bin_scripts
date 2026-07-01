@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
+IFS=$'\n\t'
 
 EBOOK_CONVERT="/Applications/calibre.app/Contents/MacOS/ebook-convert"
 
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "$@"; exit 1; }
+
 usage() {
-  echo "Usage: pdf2epub [--no-open] <input.pdf> [output.epub]"
-  echo "  Converts a PDF to an epub with math support."
-  exit 1
+  printf '%s\n' "Usage: pdf2epub [--no-open] <input.pdf> [output.epub]" \
+    "  Converts a PDF to an epub with math support."
 }
 
 NO_OPEN=0
 ARGS=()
 for arg in "$@"; do
-  [[ "$arg" == "--no-open" ]] && NO_OPEN=1 || ARGS+=("$arg")
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    --no-open) NO_OPEN=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
 done
 
-[[ ${#ARGS[@]} -lt 1 ]] && usage
+[[ ${#ARGS[@]} -lt 1 ]] && { usage >&2; exit 1; }
 
 PDF="${ARGS[0]}"
-[[ ! -f "$PDF" ]] && { echo "Error: file not found: $PDF"; exit 1; }
+[[ ! -f "$PDF" ]] && _die "Error: file not found: $PDF"
 
 BASENAME="$(basename "$PDF" .pdf)"
 OUTDIR="$(dirname "$PDF")/.${BASENAME}_work"
@@ -26,23 +33,26 @@ EPUB="${ARGS[1]:-$(dirname "$PDF")/${BASENAME}.epub}"
 
 # Step 1: PDF → Markdown (reuse cached work dir if it exists)
 if [[ -f "$OUTDIR/$BASENAME/$BASENAME.md" ]]; then
-  echo "→ Reusing existing Markdown (delete $OUTDIR to reconvert)"
+  printf '%s\n' "→ Reusing existing Markdown (delete $OUTDIR to reconvert)"
 else
-  echo "→ Converting PDF to Markdown..."
+  printf '%s\n' "→ Converting PDF to Markdown..."
   marker_single "$PDF" --output_dir "$OUTDIR" --output_format markdown
 fi
 
 MD_FILE="$OUTDIR/$BASENAME/$BASENAME.md"
-[[ ! -f "$MD_FILE" ]] && { echo "Error: marker output not found at $MD_FILE"; exit 1; }
+[[ ! -f "$MD_FILE" ]] && _die "Error: marker output not found at $MD_FILE"
 
-# Step 2: Preprocess markdown to fix common unsupported LaTeX commands
-PROCESSED_MD="$(mktemp /tmp/pdf2epub-XXXXXXXX)"
-HTML_FILE="$(mktemp /tmp/pdf2epub-XXXXXXXX)"
-trap 'rm -f "$HTML_FILE" "$PROCESSED_MD"' EXIT
+# Step 2: Preprocess markdown to fix common unsupported LaTeX commands.
+# Use a temp dir with explicit extensions so pandoc/calibre detect the formats
+# (a random mktemp dot-suffix is otherwise misread as the input format).
+TMP_DIR="$(mktemp -d -t pdf2epub)"
+PROCESSED_MD="$TMP_DIR/processed.md"
+HTML_FILE="$TMP_DIR/rendered.html"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 sed 's/\\rm /\\mathrm /g; s/\\rm{/\\mathrm{/g; s/\\bf /\\mathbf /g; s/\\bf{/\\mathbf{/g' "$MD_FILE" > "$PROCESSED_MD"
 
-echo "→ Rendering math to MathML..."
+printf '%s\n' "→ Rendering math to MathML..."
 pandoc "$PROCESSED_MD" \
   --standalone \
   --embed-resources \
@@ -52,8 +62,10 @@ pandoc "$PROCESSED_MD" \
   -o "$HTML_FILE"
 
 # Step 3: HTML → epub (calibre handles epub structure, TOC, metadata)
-echo "→ Building epub..."
-"$EBOOK_CONVERT" "$HTML_FILE" "$EPUB" --input-format html \
+printf '%s\n' "→ Building epub..."
+# Filter calibre's noisy output without letting grep's exit status (or a
+# fully-filtered, empty result) trip errexit and mask calibre's real status.
+"$EBOOK_CONVERT" "$HTML_FILE" "$EPUB" \
   --title "$BASENAME" \
   --level1-toc "//h:h1" \
   --level2-toc "//h:h2" \
@@ -65,7 +77,9 @@ echo "→ Building epub..."
   --margin-bottom 36 \
   --margin-left 36 \
   --margin-right 36 \
-  2>&1 | grep -v "^$" | grep -Ev "^(DEBUG|WARNING: Invalid|Parsing|Resolved)"
+  2>&1 | { grep -Ev "^(DEBUG|WARNING: Invalid|Parsing|Resolved|$)" || true; }
 
-echo "→ Done: $EPUB"
-[[ $NO_OPEN -eq 0 ]] && open "$EPUB"
+printf '%s\n' "→ Done: $EPUB"
+if [[ $NO_OPEN -eq 0 ]]; then
+  open "$EPUB"
+fi

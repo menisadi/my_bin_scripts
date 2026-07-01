@@ -1,32 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
+IFS=$'\n\t'
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "$@"; exit 1; }
 
 usage() {
-  echo "Usage: pdf2html [--no-open] <input.pdf> [output.html]"
-  echo "  Converts a PDF to a readable HTML file with dark mode and font size controls."
-  exit 1
+  printf '%s\n' "Usage: pdf2html [--no-open] <input.pdf> [output.html]" \
+    "  Converts a PDF to a readable HTML file with dark mode and font size controls."
 }
 
 NO_OPEN=0
 ARGS=()
 for arg in "$@"; do
-  [[ "$arg" == "--no-open" ]] && NO_OPEN=1 || ARGS+=("$arg")
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    --no-open) NO_OPEN=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
 done
 
-[[ ${#ARGS[@]} -lt 1 ]] && usage
+[[ ${#ARGS[@]} -lt 1 ]] && { usage >&2; exit 1; }
 
 PDF="${ARGS[0]}"
-[[ ! -f "$PDF" ]] && { echo "Error: file not found: $PDF"; exit 1; }
+[[ ! -f "$PDF" ]] && _die "Error: file not found: $PDF"
 
 BASENAME="$(basename "$PDF" .pdf)"
 OUTDIR="$(dirname "$PDF")/.${BASENAME}_work"
 HTML="${ARGS[1]:-$(dirname "$PDF")/${BASENAME}.html}"
 
+# Single-quoted on purpose: $title$/$body$ are pandoc template variables and
+# must reach the template file literally, not be expanded by the shell.
+# shellcheck disable=SC2016
 TOOLBAR_AND_STYLES='<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>$title$</title>
 <script>
 MathJax = { tex: { inlineMath: [["\\(","\\)"]], displayMath: [["\\[","\\]"]] } };
 </script>
@@ -66,7 +77,7 @@ body.dark #toolbar button:hover{background:rgba(255,255,255,.08);}
 @media print{
   #toolbar{display:none;}
   body{background:white!important;color:black!important;}
-  #content{max-width:none;margin:0;padding:0;box-shadow:none;border-radius:0;background:white!important;}
+  #content{max-width:none;margin:0;padding:2cm 2.5cm;box-shadow:none;border-radius:0;background:white!important;}
 }
 </style>
 </head>
@@ -87,7 +98,7 @@ body.dark #toolbar button:hover{background:rgba(255,255,255,.08);}
   document.addEventListener("DOMContentLoaded",function(){
     applyFont();applyDark();
     document.getElementById("font-inc").addEventListener("click",function(){if(fs<28){fs++;localStorage.setItem("fontSize",fs);applyFont();}});
-    document.getElementById("font-dec").addEventListener("click",function(){if(fs>12){fs--;localStorage.setItem("fontSize",fs);applyFont();}});
+    document.getElementById("font-dec").addEventListener("click",function(){if(fs>10){fs--;localStorage.setItem("fontSize",fs);applyFont();}});
     document.getElementById("dark-toggle").addEventListener("click",function(){dark=!dark;localStorage.setItem("dark",dark?"1":"0");applyDark();});
   });
 })();
@@ -98,14 +109,14 @@ $body$
 </body>
 </html>'
 
-TEMPLATE_FILE="$(mktemp /tmp/pdf2html-template-XXXXXXXX)"
-echo "$TOOLBAR_AND_STYLES" > "$TEMPLATE_FILE"
+TEMPLATE_FILE="$(mktemp -t pdf2html-template)"
+printf '%s\n' "$TOOLBAR_AND_STYLES" > "$TEMPLATE_FILE"
 trap 'rm -f "$TEMPLATE_FILE"' EXIT
 
 if [[ -f "$OUTDIR/$BASENAME/$BASENAME.md" ]]; then
-  echo "→ Reusing existing Markdown (delete $OUTDIR to reconvert)"
+  printf '%s\n' "→ Reusing existing Markdown (delete $OUTDIR to reconvert)"
 else
-  echo "→ Converting PDF to Markdown..."
+  printf '%s\n' "→ Converting PDF to Markdown..."
   marker_single "$PDF" --output_dir "$OUTDIR" --output_format markdown
 fi
 
@@ -113,9 +124,9 @@ MD_FILE="$OUTDIR/$BASENAME/$BASENAME.md"
 MD_DIR="$(dirname "$MD_FILE")"
 HTML_DIR="$(dirname "$HTML")"
 
-[[ ! -f "$MD_FILE" ]] && { echo "Error: marker output not found at $MD_FILE"; exit 1; }
+[[ ! -f "$MD_FILE" ]] && _die "Error: marker output not found at $MD_FILE"
 
-echo "→ Building HTML..."
+printf '%s\n' "→ Building HTML..."
 pandoc "$MD_FILE" \
   --standalone \
   --mathjax \
@@ -127,5 +138,7 @@ pandoc "$MD_FILE" \
 find "$MD_DIR" -maxdepth 1 \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.gif" -o -name "*.webp" \) \
   -exec cp {} "$HTML_DIR/" \; 2>/dev/null || true
 
-echo "→ Done: $HTML"
-[[ $NO_OPEN -eq 0 ]] && open "$HTML"
+printf '%s\n' "→ Done: $HTML"
+if [[ $NO_OPEN -eq 0 ]]; then
+  open "$HTML"
+fi
