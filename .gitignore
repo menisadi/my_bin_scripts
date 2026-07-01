@@ -1,4 +1,6 @@
 *.csv
 *.pgn
+*.pdf
+*.html
 /.vibemark.json
 /games
