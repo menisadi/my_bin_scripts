@@ -12,9 +12,11 @@ Usage:
 Requires env vars: LASTFM_API_KEY, LASTFM_USERNAME
 """
 
+import csv
 import os
 import re
 import json
+import sys
 import time
 import urllib.request
 import urllib.parse
@@ -429,6 +431,31 @@ def sort_albums(albums: list[dict], sort_by: str) -> list[dict]:
     return sorted(albums, key=sort_keys.get(sort_by, sort_keys["popularity"]))
 
 
+def write_csv_output(
+    results: list[dict],
+    albums_only: bool = False,
+    status_filter: list[str] | None = None,
+) -> None:
+    writer = csv.writer(sys.stdout)
+    writer.writerow(
+        ["status", "artist", "album", "tracks_heard", "total_tracks", "user_playcount", "global_playcount"]
+    )
+    for r in results:
+        albums = filter_albums_only(r["albums"]) if albums_only else r["albums"]
+        if status_filter:
+            albums = [a for a in albums if album_status(a) in status_filter]
+        for a in albums:
+            writer.writerow([
+                album_status(a),
+                r["artist"],
+                a["album"],
+                a["tracks_heard"],
+                a["total_tracks"],
+                a["user_playcount"],
+                a["global_playcount"],
+            ])
+
+
 def print_combined_report(
     results: list[dict],
     albums_only: bool = False,
@@ -661,6 +688,9 @@ def main(
     combined: bool = typer.Option(
         False, "--combined", "-c", help="Show all artists in one unified table with an Artist column"
     ),
+    csv_output: bool = typer.Option(
+        False, "--csv", help="Output as CSV to stdout (progress and warnings go to stderr)"
+    ),
     merge: bool = typer.Option(
         False, "--merge", "-m", help="Merge albums with the same name across artists"
     ),
@@ -694,6 +724,10 @@ def main(
     ),
 ):
     """Check if you've heard an artist's full discography on Last.fm."""
+    global console
+    if csv_output:
+        console = Console(stderr=True)
+
     exclude_lower = [w.lower() for w in exclude] if exclude else None
     status_filter = parse_status_filter(status) if status else None
     if sort not in VALID_SORT_KEYS:
@@ -746,6 +780,10 @@ def main(
                 )
             )
             progress.update(task_id, description=f"[green]Done: {artist}[/green]")
+
+    if csv_output:
+        write_csv_output(results, albums_only=albums_only, status_filter=status_filter)
+        return
 
     if combined:
         print_combined_report(
