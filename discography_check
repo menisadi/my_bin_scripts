@@ -429,6 +429,80 @@ def sort_albums(albums: list[dict], sort_by: str) -> list[dict]:
     return sorted(albums, key=sort_keys.get(sort_by, sort_keys["popularity"]))
 
 
+def print_combined_report(
+    results: list[dict],
+    albums_only: bool = False,
+    status_filter: list[str] | None = None,
+    sort_by: str = "popularity",
+    verbosity: int = 0,
+):
+    all_albums = []
+    for r in results:
+        albums = filter_albums_only(r["albums"]) if albums_only else r["albums"]
+        for a in albums:
+            all_albums.append({**a, "_artist": r["artist"]})
+
+    if status_filter:
+        all_albums = [a for a in all_albums if album_status(a) in status_filter]
+    all_albums = sort_albums(all_albums, sort_by)
+
+    total_scrobbles = sum(r["user_total_scrobbles"] for r in results)
+    artist_list = ", ".join(r["artist"] for r in results)
+    table = Table(
+        title=f"{artist_list}  [dim]({total_scrobbles} scrobbles)[/dim]",
+        title_style="bold",
+        show_lines=False,
+        padding=(0, 1),
+    )
+    table.add_column("", width=3, justify="center")
+    table.add_column("Artist", min_width=16, no_wrap=True)
+    table.add_column("Album", min_width=20)
+    table.add_column("Tracks", justify="right", width=8)
+    table.add_column("Plays", justify="right", width=6)
+
+    for a in all_albums:
+        status = album_status(a)
+        total = a["total_tracks"]
+        heard = a["tracks_heard"]
+        color = {"Y": "green", "P": "yellow", "N": "red"}[status]
+
+        if status == "N":
+            tracks_str = f"[dim]{total}[/dim]"
+            plays_str = "[dim]-[/dim]"
+            album_str = f"[dim]{a['album']}[/dim]"
+            artist_str = f"[dim]{a['_artist']}[/dim]"
+        elif status == "P":
+            tracks_str = f"[yellow]{heard}/{total}[/yellow]" if heard > 0 else f"[yellow]{a['user_playcount']}/{total}[/yellow]"
+            plays_str = f"[yellow]{a['user_playcount']}[/yellow]"
+            album_str = a["album"]
+            artist_str = a["_artist"]
+        else:
+            tracks_str = f"[green]{total}/{total}[/green]"
+            plays_str = f"[green]{a['user_playcount']}[/green]"
+            album_str = a["album"]
+            artist_str = a["_artist"]
+
+        table.add_row(f"[{color}]{status}[/{color}]", artist_str, album_str, tracks_str, plays_str)
+
+    console.print()
+    console.print(table)
+
+    full = sum(1 for a in all_albums if album_status(a) == "Y")
+    partial = sum(1 for a in all_albums if album_status(a) == "P")
+    missing = sum(1 for a in all_albums if album_status(a) == "N")
+
+    summary_table = Table(title="Summary", title_style="bold", show_lines=False, padding=(0, 1))
+    summary_table.add_column("", width=20)
+    summary_table.add_column("Count", justify="right", width=6)
+    summary_table.add_row("Total releases", str(len(all_albums)))
+    summary_table.add_row("[green]Fully heard[/green]", f"[green]{full}[/green]")
+    summary_table.add_row("[yellow]Partial[/yellow]", f"[yellow]{partial}[/yellow]")
+    summary_table.add_row("[red]Not heard[/red]", f"[red]{missing}[/red]")
+
+    console.print()
+    console.print(summary_table)
+
+
 def print_report(
     results: list[dict],
     albums_only: bool = False,
@@ -584,6 +658,9 @@ def main(
         "-e",
         help="Exclude albums containing these words (e.g. -e remix -e live)",
     ),
+    combined: bool = typer.Option(
+        False, "--combined", "-c", help="Show all artists in one unified table with an Artist column"
+    ),
     merge: bool = typer.Option(
         False, "--merge", "-m", help="Merge albums with the same name across artists"
     ),
@@ -669,6 +746,16 @@ def main(
                 )
             )
             progress.update(task_id, description=f"[green]Done: {artist}[/green]")
+
+    if combined:
+        print_combined_report(
+            results,
+            albums_only=albums_only,
+            status_filter=status_filter,
+            sort_by=sort,
+            verbosity=verbose,
+        )
+        return
 
     if merge:
         results = merge_results(results)
