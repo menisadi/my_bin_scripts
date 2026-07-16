@@ -1,0 +1,182 @@
+#!/usr/bin/env zsh
+# history-delete — delete shell history entries by substring match
+#
+# Searches zsh history file and atuin database, shows a summary,
+# optionally lists matches, then asks for confirmation before deleting.
+#
+# Usage: history-delete <pattern>
+
+set -euo pipefail
+
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+    print "Usage: ${0:t} <pattern>
+
+Search zsh history and atuin for commands matching <pattern> (case-insensitive
+substring), show a summary, optionally list matches, then delete on confirmation.
+
+Arguments:
+  pattern    Substring to search for (case-insensitive)
+
+Options:
+  -h, --help  Show this help message
+
+Notes:
+  - zsh history is read from \$HISTFILE (default: ~/.zsh_history)
+  - Matches <= 20 are listed automatically; more requires confirmation to list
+  - Deletions from zsh history take effect on disk immediately but won't affect
+    the current shell's in-memory history (run 'fc -R' to reload if needed)"
+    exit 0
+fi
+
+if (( $# < 1 )); then
+    print "Usage: ${0:t} <pattern>" >&2
+    exit 1
+fi
+
+pattern="$1"
+pattern_lower="${pattern:l}"
+histfile="${HISTFILE:-$HOME/.zsh_history}"
+
+# ── Parse zsh history ─────────────────────────────────────────────────────────
+# Extended format lines: ': timestamp:elapsed;command'
+# Multi-line commands: each continuation line ends with '\'
+
+typeset -a zsh_match_cmds=() zsh_keep_lines=() _entry=()
+typeset -i zsh_match_count=0
+
+_flush_entry() {
+    if (( ${#_entry[@]} == 0 )); then return 0; fi
+    local first="${_entry[1]}"
+    local cmd
+    if [[ "$first" == ': '[0-9]*:[0-9]*';'* ]]; then
+        cmd="${first#*;}"
+    else
+        cmd="$first"
+    fi
+    local i
+    for (( i=2; i<=${#_entry[@]}; i++ )); do
+        cmd+=$'\n'"${_entry[$i]}"
+    done
+    if [[ "${cmd:l}" == *"$pattern_lower"* ]]; then
+        zsh_match_count=$(( zsh_match_count + 1 ))
+        zsh_match_cmds+=("$cmd")
+    else
+        zsh_keep_lines+=("${_entry[@]}")
+    fi
+    _entry=()
+}
+
+if [[ -f "$histfile" ]]; then
+    typeset -i _in_cont=0
+    typeset _line=""
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        if (( _in_cont )); then
+            _entry+=("$_line")
+            if [[ "$_line" != *\\ ]]; then
+                _in_cont=0
+                _flush_entry
+            fi
+        else
+            _flush_entry
+            _entry=("$_line")
+            if [[ "$_line" == *\\ ]]; then
+                _in_cont=1
+            else
+                _flush_entry
+            fi
+        fi
+    done < "$histfile"
+    _flush_entry
+fi
+
+# ── Query atuin ───────────────────────────────────────────────────────────────
+
+typeset -a atuin_match_cmds=()
+typeset -i atuin_count=0 has_atuin=0
+
+if command -v atuin &>/dev/null; then
+    has_atuin=1
+    typeset _line=""
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        if [[ -n "$_line" ]]; then atuin_match_cmds+=("$_line"); fi
+    done < <(atuin search --cmd-only --search-mode full-text \
+             --filter-mode global --include-duplicates "$pattern" 2>/dev/null || true)
+    atuin_count=${#atuin_match_cmds[@]}
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+total=$(( zsh_match_count + atuin_count ))
+
+if (( total == 0 )); then
+    print "No matches found for: '$pattern'"
+    exit 0
+fi
+
+print ""
+print "Matches for: '$pattern'"
+if (( zsh_match_count > 0 )); then
+    print "  zsh history : $zsh_match_count"
+fi
+if (( has_atuin )); then
+    print "  atuin       : $atuin_count"
+fi
+print ""
+
+# List matches automatically if ≤ 20 total, otherwise ask
+typeset -i _show=0
+if (( total <= 20 )); then
+    _show=1
+else
+    typeset _ans=""
+    print -n "List all $total matching commands? [y/N] "
+    read -r _ans || true
+    if [[ "${_ans:l}" == y* ]]; then _show=1; fi
+fi
+
+if (( _show )); then
+    if (( zsh_match_count > 0 )); then
+        print "── zsh history ──────────────────────────"
+        for _cmd in "${zsh_match_cmds[@]}"; do
+            print "  ${_cmd}"
+        done
+    fi
+    if (( atuin_count > 0 )); then
+        print "── atuin ────────────────────────────────"
+        for _cmd in "${atuin_match_cmds[@]}"; do
+            print "  ${_cmd}"
+        done
+    fi
+    print ""
+fi
+
+# ── Confirm ───────────────────────────────────────────────────────────────────
+
+typeset _confirm=""
+print -n "Delete all $total match(es)? [y/N] "
+read -r _confirm || true
+if [[ "${_confirm:l}" != y* ]]; then
+    print "Aborted."
+    exit 0
+fi
+
+# ── Delete ────────────────────────────────────────────────────────────────────
+
+if (( zsh_match_count > 0 )); then
+    typeset _tmp="${histfile}.tmp.$$"
+    if (( ${#zsh_keep_lines[@]} > 0 )); then
+        printf '%s\n' "${zsh_keep_lines[@]}" > "$_tmp"
+    else
+        : > "$_tmp"
+    fi
+    mv "$_tmp" "$histfile"
+    fc -R "$histfile"
+    print "  zsh history : removed $zsh_match_count entry/entries"
+fi
+
+if (( has_atuin && atuin_count > 0 )); then
+    atuin search --delete --search-mode full-text --filter-mode global "$pattern" 2>/dev/null || true
+    print "  atuin       : removed $atuin_count entry/entries"
+fi
+
+print "Done."
