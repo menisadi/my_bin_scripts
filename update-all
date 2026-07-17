@@ -5,6 +5,18 @@ IFS=$'\n\t'
 _warn() { printf '%s\n' "$*" >&2; }
 _die() { _warn "$@"; exit 1; }
 
+UV_COOLDOWN_DAYS=7
+
+# Portability: GNU date (Linux) vs BSD date (macOS) relative-date syntax differs.
+_days_ago() {
+  local days="$1"
+  if date --version >/dev/null 2>&1; then
+    date -u -d "${days} days ago" +"%Y-%m-%dT%H:%M:%SZ"
+  else
+    date -u -v-"${days}"d +"%Y-%m-%dT%H:%M:%SZ"
+  fi
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "${0}") [-y|--yes]
@@ -39,7 +51,7 @@ echo "==> npm globals"
 npm update -g
 
 echo "==> uv tools"
-uv tool upgrade --all
+uv tool upgrade --all --exclude-newer "$(_days_ago "${UV_COOLDOWN_DAYS}")"
 
 echo "==> vim (vim-plug)"
 vim -es -u ~/.vimrc -i NONE -c "PlugUpdate" -c "qa"
