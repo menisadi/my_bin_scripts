@@ -1,7 +1,39 @@
 #!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "$@"; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: $(basename "${0}") [-y|--yes]
+
+  -y, --yes   Skip confirmation prompts (passes --yes to brew upgrade)
+  -h, --help  Show this help
+EOF
+}
+
+brew_upgrade_flags=()
+
+while [[ $# -gt 0 ]]; do
+  case "${1}" in
+    -y|--yes)
+      brew_upgrade_flags+=(--yes)
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      _die "Unknown option: ${1}"
+      ;;
+  esac
+done
 
 echo "==> Homebrew"
-brew update && brew upgrade && brew cleanup
+brew update && brew upgrade "${brew_upgrade_flags[@]}" && brew cleanup
 
 echo "==> npm globals"
 npm update -g
