@@ -183,7 +183,7 @@ def get_top(
     return results[:n]
 
 
-def get_calendar_range(period: str) -> tuple[int, int]:
+def get_calendar_range(period: str, year: Optional[int] = None) -> tuple[int, int]:
     today = date.today()
     if period == "thisweek":
         start = today - timedelta(days=today.weekday())
@@ -192,8 +192,9 @@ def get_calendar_range(period: str) -> tuple[int, int]:
         start = today.replace(day=1)
         end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     else:  # thisyear
-        start = today.replace(month=1, day=1)
-        end = start.replace(year=today.year + 1)
+        y = year if year is not None else today.year
+        start = date(y, 1, 1)
+        end = date(y + 1, 1, 1)
     return (
         int(datetime(start.year, start.month, start.day).timestamp()),
         int(datetime(end.year, end.month, end.day).timestamp()),
@@ -206,6 +207,7 @@ def get_top_calendar(
     item_type: str,
     n: int,
     period: str,
+    year: Optional[int] = None,
     user_agent: str = "lastfm-top/1.0 (contact: you@example.com)",
     max_retries: int = 5,
 ) -> List[Dict[str, Any]]:
@@ -227,7 +229,7 @@ def get_top_calendar(
         },
     }[item_type]
 
-    from_ts, to_ts = get_calendar_range(period)
+    from_ts, to_ts = get_calendar_range(period, year=year)
     params = {
         "method": cfg["method"],
         "api_key": api_key,
@@ -336,6 +338,12 @@ def main() -> int:
         help="Time period (default: overall)",
     )
     p.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="Explicit calendar year (e.g. 2025); implies --period thisyear",
+    )
+    p.add_argument(
         "--per-page",
         type=int,
         default=200,
@@ -366,6 +374,9 @@ def main() -> int:
         print("--n must be > 0", file=sys.stderr)
         return 2
 
+    if args.year is not None:
+        args.period = "thisyear"
+
     if args.period in CALENDAR_PERIODS:
         rows = get_top_calendar(
             api_key=args.api_key,
@@ -373,6 +384,7 @@ def main() -> int:
             item_type=args.type,
             n=args.n,
             period=args.period,
+            year=args.year,
             user_agent=args.user_agent,
         )
     else:
