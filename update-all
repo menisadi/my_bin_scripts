@@ -21,17 +21,76 @@ usage() {
   cat <<EOF
 Usage: $(basename "${0}") [-y|--yes]
 
-  -y, --yes   Skip confirmation prompts (passes --yes to brew upgrade)
+  -y, --yes   Skip confirmation prompts (passes --yes to brew upgrade;
+              also auto-trusts any untrusted tap formulae found)
   -h, --help  Show this help
 EOF
 }
 
+# Prompts to `brew trust` any tap formulae that brew upgrade/cleanup skipped
+# as untrusted, resolving each formula's tap from its install receipt.
+_trust_untrusted_formulae() {
+  local log="$1"
+  local auto_yes="$2"
+  local -a names=()
+  local line
+  while IFS= read -r line; do
+    names+=("${line}")
+  done < <(
+    grep -E '^Warning: Skipping [^:]+: tap formula is not trusted$' "${log}" \
+      | sed -E 's/^Warning: Skipping ([^:]+):.*/\1/' \
+      | sort -u
+  )
+
+  if ((${#names[@]} == 0)); then
+    return 0
+  fi
+
+  echo
+  echo "==> Untrusted tap formulae skipped during upgrade:"
+  printf '  - %s\n' "${names[@]}"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    _warn "jq not found; run 'brew trust --formula <tap>/<formula>' manually to trust these."
+    return 0
+  fi
+
+  local reply="n"
+  if [[ "${auto_yes}" == "true" ]]; then
+    reply="y"
+  elif [[ -t 0 ]]; then
+    read -rp "Trust these now? [y/N] " reply
+  else
+    _warn "Non-interactive shell; skipping trust prompt. Run 'brew trust --formula <tap>/<formula>' manually."
+  fi
+  if [[ ! "${reply}" =~ ^[Yy]$ ]]; then
+    return 0
+  fi
+
+  local name tap
+  for name in "${names[@]}"; do
+    local -a receipt_paths=("$(brew --cellar)/${name}"/*/INSTALL_RECEIPT.json)
+    if [[ ! -f "${receipt_paths[0]}" ]]; then
+      _warn "Could not find install receipt for ${name}; skipping trust"
+      continue
+    fi
+    tap="$(jq -r '.source.tap // empty' "${receipt_paths[0]}")"
+    if [[ -z "${tap}" ]]; then
+      _warn "Could not determine tap for ${name}; skipping trust"
+      continue
+    fi
+    brew trust --formula "${tap}/${name}"
+  done
+}
+
 brew_upgrade_flags=()
+yes_flag="false"
 
 while [[ $# -gt 0 ]]; do
   case "${1}" in
     -y|--yes)
       brew_upgrade_flags+=(--yes)
+      yes_flag="true"
       shift
       ;;
     -h|--help)
@@ -44,8 +103,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+brew_log="$(mktemp)"
+trap 'rm -f "${brew_log}"' EXIT
+
 echo "==> Homebrew"
-brew update && brew upgrade "${brew_upgrade_flags[@]}" && brew cleanup
+brew update
+brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "${brew_log}" >&2)
+brew cleanup 2> >(tee -a "${brew_log}" >&2)
 
 echo "==> npm globals"
 npm update -g
@@ -64,3 +128,5 @@ NVIM_APPNAME=astronvim nvim --headless "+Lazy! update" +qa
 
 echo "==> neovim/minvim (vim.pack)"
 nvim --headless -c "PackUpdate!" -c "qa"
+
+_trust_untrusted_formulae "${brew_log}" "${yes_flag}"
