@@ -4,3 +4,6 @@
 *.html
 /.vibemark.json
 /games
+/.lastfm_gems/disco
+/.lastfm_gems
+/signals
