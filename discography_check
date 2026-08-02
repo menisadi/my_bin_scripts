@@ -251,8 +251,6 @@ def check_artist(
             max_pc = max(a["global_playcount"] for a in real_albums)
             threshold = max(1000, int(max_pc * 0.001))
         real_albums = [a for a in real_albums if a["global_playcount"] >= threshold]
-        if dedup:
-            real_albums = dedupe_album_candidates(real_albums)
 
         progress.update(task_id, total=len(real_albums), completed=0)
     results = []
