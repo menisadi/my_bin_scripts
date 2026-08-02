@@ -67,7 +67,7 @@ body.dark code{background:#333;}
 body.dark blockquote{border-left-color:#555;color:#aaa;}
 body.dark a{color:#7aadcf;}
 body.dark img{filter:brightness(.85);}
-#toolbar{position:fixed;top:1.2rem;right:1.4rem;display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #ddd;border-radius:8px;padding:6px 10px;box-shadow:0 2px 8px rgba(0,0,0,.1);z-index:1000;font-family:system-ui,sans-serif;font-size:14px;}
+#toolbar{position:fixed;top:1.2rem;right:1.4rem;display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #ddd;border-radius:8px;padding:6px 10px;box-shadow:0 2px 8px rgba(0,0,0,.1);z-index:1000;font-family:system-ui,sans-serif;font-size:14px;transform:translateZ(0);}
 body.dark #toolbar{background:#242424;border-color:#444;color:#d4d4d4;}
 #toolbar button{background:none;border:1px solid #ccc;border-radius:5px;padding:3px 9px;cursor:pointer;font-size:14px;color:inherit;line-height:1.4;}
 body.dark #toolbar button{border-color:#555;}
