@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+SCOREBOARD_URL="https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
+
+usage() {
+    cat <<'EOF'
+Usage: worldcup-watch [-i SECONDS] [-h]
+
+Poll ESPN's public World Cup scoreboard and notify (terminal + macOS
+notification) on goals, cards, and match-state changes (kickoff, halftime,
+full time, extra time, penalties) for today's match.
+
+Options:
+  -i SECONDS   Poll interval in seconds (default: 15)
+  -h           Show this help and exit
+EOF
+}
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "$@"; exit 1; }
+
+interval=15
+
+while getopts ":i:h" opt; do
+    case "${opt}" in
+        i) interval="${OPTARG}" ;;
+        h) usage; exit 0 ;;
+        *) usage >&2; exit 1 ;;
+    esac
+done
+
+command -v curl >/dev/null 2>&1 || _die "curl is required"
+command -v jq >/dev/null 2>&1 || _die "jq is required"
+
+_clear_line() { printf '\r\033[K'; }
+_live_update() { printf '\r\033[K%s' "$1"; }
+
+_notify() {
+    local title="$1"
+    local message="$2"
+
+    _clear_line
+    printf '[%s] %s\n' "$(date '+%H:%M:%S')" "${message}"
+    printf '\a'
+
+    if command -v osascript >/dev/null 2>&1; then
+        local escaped_title="${title//\\/\\\\}"
+        escaped_title="${escaped_title//\"/\\\"}"
+        local escaped_message="${message//\\/\\\\}"
+        escaped_message="${escaped_message//\"/\\\"}"
+        osascript -e "display notification \"${escaped_message}\" with title \"${escaped_title}\" sound name \"Glass\"" || true
+    fi
+}
+
+_period_label() {
+    local status_name="$1"
+    local period="$2"
+
+    case "${status_name}" in
+        STATUS_SCHEDULED) printf '%s' "Kickoff coming up" ;;
+        STATUS_HALFTIME) printf '%s' "Halftime" ;;
+        STATUS_FINAL|STATUS_FULL_TIME) printf '%s' "Full Time" ;;
+        STATUS_IN_PROGRESS)
+            case "${period}" in
+                1) printf '%s' "1st Half underway" ;;
+                2) printf '%s' "2nd Half underway" ;;
+                3) printf '%s' "Extra Time - 1st Half" ;;
+                4) printf '%s' "Extra Time - 2nd Half" ;;
+                5) printf '%s' "Penalty Shootout" ;;
+                *) printf 'In Progress (period %s)' "${period}" ;;
+            esac
+            ;;
+        *) printf '%s' "${status_name//STATUS_/}" ;;
+    esac
+}
+
+prev_status_key=""
+prev_details_count=0
+
+trap '_clear_line; printf "\n"' EXIT
+
+_warn "Watching today's World Cup match, polling every ${interval}s. Ctrl-C to stop."
+
+while true; do
+    json="$(curl -s --max-time 10 "${SCOREBOARD_URL}")" || {
+        _warn "fetch failed, retrying in ${interval}s"
+        sleep "${interval}"
+        continue
+    }
+
+    event_count="$(jq -r '.events | length' <<<"${json}" 2>/dev/null || echo 0)"
+    if [[ "${event_count}" -lt 1 ]]; then
+        _warn "no match found, retrying in ${interval}s"
+        sleep "${interval}"
+        continue
+    fi
+
+    read -r status_state status_name period clock_detail home_id home_name home_score away_name away_score <<<"$(
+        jq -r '.events[0] as $e
+            | ($e.competitions[0].competitors[] | select(.homeAway=="home")) as $h
+            | ($e.competitions[0].competitors[] | select(.homeAway=="away")) as $a
+            | [$e.status.type.state, $e.status.type.name, ($e.status.period|tostring), $e.status.type.detail,
+               $h.team.id, $h.team.shortDisplayName, $h.score,
+               $a.team.shortDisplayName, $a.score]
+            | @tsv' <<<"${json}"
+    )"
+
+    status_key="${status_state}|${status_name}|${period}"
+    if [[ "${status_key}" != "${prev_status_key}" ]]; then
+        if [[ -n "${prev_status_key}" ]]; then
+            label="$(_period_label "${status_name}" "${period}")"
+            _notify "World Cup Final" "${label} — ${home_name} ${home_score}-${away_score} ${away_name}"
+        fi
+        prev_status_key="${status_key}"
+    fi
+
+    details_count="$(jq -r '.events[0].competitions[0].details // [] | length' <<<"${json}")"
+    if [[ "${details_count}" -gt "${prev_details_count}" ]]; then
+        while IFS= read -r detail; do
+            read -r type_text clock_display team_id scoring_play own_goal red_card yellow_card player <<<"$(
+                jq -r '[.type.text, .clock.displayValue, .team.id, .scoringPlay, .ownGoal, .redCard, .yellowCard,
+                        (.athletesInvolved[0].displayName // "Unknown")] | @tsv' <<<"${detail}"
+            )"
+
+            if [[ "${team_id}" == "${home_id}" ]]; then
+                team_name="${home_name}"
+            else
+                team_name="${away_name}"
+            fi
+
+            if [[ "${scoring_play}" == "true" ]]; then
+                icon="⚽ GOAL!"
+                if [[ "${own_goal}" == "true" ]]; then
+                    icon="⚽ OWN GOAL!"
+                fi
+            elif [[ "${red_card}" == "true" ]]; then
+                icon="🟥 RED CARD"
+            elif [[ "${yellow_card}" == "true" ]]; then
+                icon="🟨 Yellow card"
+            else
+                icon="${type_text}"
+            fi
+
+            message="${icon} — ${team_name} — ${player} (${clock_display})"
+            if [[ "${scoring_play}" == "true" ]]; then
+                message="${message} — ${home_name} ${home_score}-${away_score} ${away_name}"
+            fi
+            _notify "World Cup Final" "${message}"
+        done < <(jq -c ".events[0].competitions[0].details[${prev_details_count}:${details_count}][]" <<<"${json}")
+        prev_details_count="${details_count}"
+    fi
+
+    if [[ "${status_state}" == "post" ]]; then
+        _notify "World Cup Final" "Match finished — final score ${home_name} ${home_score}-${away_score} ${away_name}"
+        exit 0
+    fi
+
+    _live_update "$(printf '%s   %s %s-%s %s' "${clock_detail}" "${home_name}" "${home_score}" "${away_score}" "${away_name}")"
+
+    sleep "${interval}"
+done
