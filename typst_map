@@ -1,0 +1,313 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = [
+#     "rich",
+#     "tree-sitter",
+#     "tree-sitter-typst @ git+https://github.com/SeniorMars/tree-sitter-typst.git@1acd48c90d260bc9f8a99f903d3e2a8031bc7aae",
+# ]
+# ///
+"""
+typst_map – pretty-prints the logical structure of a Typst (.typ) file.
+
+Shows the heading outline plus any labeled theorem-like environments
+(auto-discovered from `#let x = thmbox(...)/thmplain(...)/thmproof(...)`
+definitions -- the `ctheorems` package convention) and figures/tables,
+each with its title and <label>. With -r/--refs, also lists the @label
+cross-references used inside each block, which gives a rough dependency
+view of which results a proof leans on.
+
+Usage:
+    typst_map [options] path/to/paper.typ
+
+Note: this relies on an unofficial tree-sitter-typst grammar binding
+that segfaults during Python interpreter shutdown, after all output has
+already been printed. This script calls os._exit(0) at the end to
+sidestep that rather than let normal GC run.
+
+Known gap: `#heading(...)[Title]` function-call syntax (as opposed to
+`=`/`==` markup headings) is not grouped into a section -- a rare style
+choice, e.g. sometimes used for a References heading.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import pathlib
+import sys
+from textwrap import shorten
+from types import SimpleNamespace
+
+import tree_sitter_typst as tstypst
+from rich.console import Console
+from rich.markup import escape
+from rich.tree import Tree
+from tree_sitter import Language, Node, Parser
+
+THEOREM_CONSTRUCTORS = {"thmbox", "thmplain", "thmproof"}
+KIND_COLORS = {
+    "Theorem": "bold blue",
+    "Lemma": "blue",
+    "Proposition": "blue",
+    "Corollary": "cyan",
+    "Remark": "yellow",
+    "Example": "yellow",
+    "Proof": "dim",
+    "Figure": "green",
+    "Table": "green",
+    "Equation": "magenta",
+}
+
+_WRAP_PAIRS = {'"': '"', "(": ")", "[": "]"}
+
+
+def text(node: Node) -> str:
+    return node.text.decode("utf-8", "replace") if node.text else ""
+
+
+def _strip_wrap(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and _WRAP_PAIRS.get(s[0]) == s[-1]:
+        s = s[1:-1].strip()
+    return s
+
+
+def _pair_labels(children: list[Node]) -> list[tuple[Node | None, Node | None]]:
+    """Pair each non-label node with a following <label> sibling, if any."""
+    out: list[tuple[Node | None, Node | None]] = []
+    for c in children:
+        if c.type == "label":
+            if out:
+                out[-1] = (out[-1][0], c)
+            continue
+        out.append((c, None))
+    return out
+
+
+def _call_identifier(call: Node) -> str | None:
+    first = call.children[0] if call.children else None
+    if first is not None and first.type == "identifier":
+        return text(first)
+    return None
+
+
+def _call_args_children(call: Node) -> list[Node]:
+    """Flatten a function_call's argument list, whether or not there's an
+    `arguments` wrapper (bare `#name[...]` calls have none)."""
+    for c in call.children:
+        if c.type == "arguments":
+            return list(c.children)
+    return list(call.children[1:])
+
+
+def _nth_string_arg(call: Node, n: int) -> str | None:
+    strings = [c for c in _call_args_children(call) if c.type == "string"]
+    if len(strings) <= n:
+        return None
+    s = strings[n]
+    content = next((c for c in s.children if c.type == "string_content"), None)
+    return text(content) if content is not None else _strip_wrap(text(s))
+
+
+def _call_title(call: Node) -> str | None:
+    title = _nth_string_arg(call, 0)
+    if title:
+        return title
+    # e.g. `#proof([of @thm:main])[...]`: two content-block args means the
+    # first one is a title, the last is the body.
+    blocks = [c for c in _call_args_children(call) if c.type == "content_block"]
+    if len(blocks) >= 2:
+        return _strip_wrap(" ".join(text(blocks[0]).split()))
+    return None
+
+
+def _figure_caption(call: Node) -> str | None:
+    for c in _call_args_children(call):
+        if c.type == "named_argument" and text(c).startswith("caption"):
+            raw = text(c).split(":", 1)[-1]
+            return _strip_wrap(" ".join(raw.split()))
+    return None
+
+
+def discover_env_kinds(root: Node) -> dict[str, str]:
+    """Map macro alias -> display kind name, learned from
+    `#let alias = thmbox("id", "Kind", ...)` / thmplain / thmproof lines.
+    Works for any paper using the ctheorems package; yields an empty map
+    for papers that don't."""
+    mapping: dict[str, str] = {}
+
+    def walk(n: Node) -> None:
+        if n.type == "let_binding":
+            ident = next((c for c in n.children if c.type == "identifier"), None)
+            call = next((c for c in n.children if c.type == "function_call"), None)
+            if ident is not None and call is not None:
+                callee = _call_identifier(call)
+                if callee in THEOREM_CONSTRUCTORS:
+                    kind = _nth_string_arg(call, 1) or text(ident).title()
+                    mapping[text(ident)] = kind
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return mapping
+
+
+def _find_embedded_call(embedded: Node) -> Node | None:
+    return next((c for c in embedded.children if c.type == "function_call"), None)
+
+
+def collect_refs(node: Node) -> list[str]:
+    refs: list[str] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "reference":
+            refs.append(text(n).lstrip("@"))
+        for c in n.children:
+            walk(c)
+
+    walk(node)
+    seen: list[str] = []
+    for r in refs:
+        if r not in seen:
+            seen.append(r)
+    return seen
+
+
+def classify(node: Node, env_kinds: dict[str, str], has_label: bool) -> tuple[str, str | None] | None:
+    """Return (kind, title) for a recognized construct, else None."""
+    if node.type == "embedded_code":
+        call = _find_embedded_call(node)
+        if call is None:
+            return None
+        callee = _call_identifier(call)
+        if callee is None:
+            return None
+        if callee in env_kinds:
+            return env_kinds[callee], _call_title(call)
+        if callee == "figure":
+            return "Figure", _figure_caption(call)
+        if callee == "table":
+            return "Table", _figure_caption(call)
+        if has_label:
+            return callee.replace("-", " ").title(), _call_title(call)
+        return None
+    if node.type == "equation" and has_label:
+        snippet = shorten(" ".join(text(node).split()), width=40, placeholder=" …")
+        return "Equation", snippet
+    return None
+
+
+def _heading_level(heading: Node) -> int:
+    marker = next((c for c in heading.children if c.type == "heading_marker"), None)
+    return len(text(marker)) if marker is not None else 1
+
+
+def _heading_title(heading: Node) -> str:
+    body = next((c for c in heading.children if c.type == "heading_body"), None)
+    return " ".join(text(body).split()) if body is not None else ""
+
+
+def add_leaf(branch: Tree, kind: str, title: str | None, label: Node | None, node: Node, opts: SimpleNamespace) -> None:
+    color = KIND_COLORS.get(kind, "white")
+    parts = [f"[{color}]{escape(kind)}[/]"]
+    if title:
+        shown = shorten(title, width=opts.max_len, placeholder=" …")
+        parts.append(f'"{escape(shown)}"')
+    if label is not None:
+        parts.append(f"[dim]<{escape(text(label)[1:-1])}>[/]")
+    if opts.show_lineno:
+        parts.append(f"[dim](L{node.start_point[0] + 1})[/]")
+    leaf = branch.add(" ".join(parts))
+    if opts.show_refs:
+        refs = collect_refs(node)
+        if refs:
+            leaf.add(f"[dim]uses: {escape(', '.join(refs))}[/]")
+
+
+def render_blocks(children: list[Node], branch: Tree, env_kinds: dict[str, str], opts: SimpleNamespace) -> None:
+    """Render non-section constructs (theorem-likes, figures, equations)."""
+    for node, label in _pair_labels(children):
+        if node is None or node.type == "section":
+            continue  # sections are flat siblings at the root; see add_section
+        result = classify(node, env_kinds, label is not None)
+        if result is None:
+            continue
+        kind, title = result
+        add_leaf(branch, kind, title, label, node, opts)
+
+
+def add_section(section: Node, stack: list[tuple[int, Tree]], env_kinds: dict[str, str], opts: SimpleNamespace) -> None:
+    """`section` nodes are a flat list at the document root -- level 1 and
+    level 2 headings are siblings, not nested -- so the heading hierarchy
+    has to be reconstructed here from each heading's `=` count, like
+    turning a flat outline list back into nested bullets."""
+    pairs = _pair_labels(list(section.children))
+    heading, hlabel = pairs[0]
+    if heading is None:
+        return
+    level = _heading_level(heading)
+    if opts.max_depth and level > opts.max_depth:
+        return
+    while len(stack) > 1 and stack[-1][0] >= level:
+        stack.pop()
+    title = _heading_title(heading)
+    marker = "#" * level
+    label_txt = f" [dim]<{escape(text(hlabel)[1:-1])}>[/]" if hlabel is not None else ""
+    lineno = f" [dim](L{heading.start_point[0] + 1})[/]" if opts.show_lineno else ""
+    sub = stack[-1][1].add(f"[bold]{marker} {escape(title)}[/]{label_txt}{lineno}")
+    stack.append((level, sub))
+    for n, _ in pairs[1:]:
+        if n is not None and n.type == "content":
+            render_blocks(list(n.children), sub, env_kinds, opts)
+
+
+def build_tree(path: pathlib.Path, opts: SimpleNamespace) -> Tree:
+    lang = Language(tstypst.language())
+    parser = Parser(lang)
+    src = path.read_bytes()
+    root = parser.parse(src).root_node
+    env_kinds = discover_env_kinds(root)
+    rich_tree = Tree(f"[bold bright_blue]{escape(path.name)}[/]", guide_style="bright_blue")
+
+    stack: list[tuple[int, Tree]] = [(0, rich_tree)]
+    for node, label in _pair_labels(list(root.children)):
+        if node is None:
+            continue
+        if node.type == "section":
+            add_section(node, stack, env_kinds, opts)
+        else:
+            result = classify(node, env_kinds, label is not None)
+            if result is not None:
+                kind, title = result
+                add_leaf(stack[-1][1], kind, title, label, node, opts)
+    return rich_tree
+
+
+if __name__ == "__main__":
+    cli = argparse.ArgumentParser(description="Pretty-print the logical structure of a Typst file.")
+    cli.add_argument("path", help="path to a .typ file")
+    cli.add_argument(
+        "-r", "--refs", action="store_true", help="show @label cross-references used inside each block"
+    )
+    cli.add_argument("-n", "--lineno", action="store_true", help="append line numbers like (L42)")
+    cli.add_argument(
+        "-m", "--max-len", type=int, default=70, help="truncate titles to this width (default: 70)"
+    )
+    cli.add_argument(
+        "-d",
+        "--depth",
+        type=int,
+        default=0,
+        metavar="N",
+        help="limit heading nesting to N levels (0 = unlimited)",
+    )
+    args = cli.parse_args()
+
+    render_opts = SimpleNamespace(
+        max_depth=args.depth, max_len=args.max_len, show_lineno=args.lineno, show_refs=args.refs
+    )
+    result_tree = build_tree(pathlib.Path(args.path), render_opts)
+    Console(force_terminal=True).print(result_tree)
+
+    sys.stdout.flush()
+    os._exit(0)  # see module docstring: works around a shutdown-time segfault
