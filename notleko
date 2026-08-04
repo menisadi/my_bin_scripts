@@ -135,7 +135,7 @@ def print_status(
     msg = game_over_message(board)
     if msg:
         console.print(f"[bold green]{msg}[/bold green]")
-        outcome = board.outcome()
+        outcome = board.outcome(claim_draw=True)
         if outcome:
             console.print(f"Result: {outcome.result()}")
     else:
@@ -186,7 +186,9 @@ def cmd_status(args: argparse.Namespace) -> None:
                     "turn": "white" if board.turn == chess.WHITE else "black",
                     "fullmove": board.fullmove_number,
                     "last_move": last_move.uci() if last_move else None,
-                    "legal_moves": [{"uci": m.uci(), "san": board.san(m)} for m in legal],
+                    "legal_moves": [
+                        {"uci": m.uci(), "san": board.san(m)} for m in legal
+                    ],
                     "result": game.headers.get("Result", "*"),
                     "illegal_attempts": int(game.headers.get("IllegalAttempts", "0")),
                     "game_over_reason": game_over_message(board),
@@ -251,7 +253,7 @@ def cmd_move(args: argparse.Namespace) -> None:
 
     over = game_over_message(board)
     if over:
-        outcome = board.outcome()
+        outcome = board.outcome(claim_draw=True)
         if outcome:
             game.headers["Result"] = outcome.result()
 
@@ -303,7 +305,7 @@ def cmd_engine(args: argparse.Namespace) -> None:
 
         over = game_over_message(board)
         if over:
-            outcome = board.outcome()
+            outcome = board.outcome(claim_draw=True)
             if outcome:
                 game.headers["Result"] = outcome.result()
 
@@ -381,13 +383,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Chess CLI — play or let an agent play against Stockfish, one move per invocation."
     )
-    parser.add_argument(
+
+    # --file is shared by every subcommand and goes after it, e.g.
+    # `notleko new --file game.pgn` — the position agents reach for naturally.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--file", default="game.pgn", help="PGN state file (default: game.pgn)"
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_new = sub.add_parser("new", help="Start a new game")
+    p_new = sub.add_parser("new", help="Start a new game", parents=[common])
     p_new.add_argument(
         "--color", choices=["white", "black"], default="white", help="Agent color"
     )
@@ -396,20 +402,26 @@ def main() -> None:
         "--force", action="store_true", help="Overwrite an existing game file"
     )
 
-    p_status = sub.add_parser("status", help="Show current board, FEN, and whose turn it is")
+    p_status = sub.add_parser(
+        "status", help="Show current board, FEN, and whose turn it is", parents=[common]
+    )
     p_status.add_argument(
         "--json",
         action="store_true",
         help="Output machine-readable JSON (fen, turn, legal_moves, agent_color, …)",
     )
 
-    p_move = sub.add_parser("move", help="Play a move in UCI format (e.g. e2e4)")
+    p_move = sub.add_parser(
+        "move", help="Play a move in UCI format (e.g. e2e4)", parents=[common]
+    )
     p_move.add_argument("uci", help="Move in UCI format")
     p_move.add_argument(
         "--reason", help="Reasoning for the move (saved as PGN comment)"
     )
 
-    p_engine = sub.add_parser("engine", help="Let Stockfish play the next move")
+    p_engine = sub.add_parser(
+        "engine", help="Let Stockfish play the next move", parents=[common]
+    )
     p_engine.add_argument(
         "--engine",
         default=DEFAULT_ENGINE,
@@ -427,7 +439,7 @@ def main() -> None:
     )
 
     p_comment = sub.add_parser(
-        "comment", help="Add or append a comment to the last move"
+        "comment", help="Add or append a comment to the last move", parents=[common]
     )
     p_comment.add_argument("comment", help="Comment text")
     p_comment.add_argument(
@@ -436,10 +448,16 @@ def main() -> None:
         help="Replace existing comment instead of appending",
     )
 
-    p_resign = sub.add_parser("resign", help="Resign the game")
-    p_resign.add_argument("--comment", help="Optional comment appended to the last move")
+    p_resign = sub.add_parser("resign", help="Resign the game", parents=[common])
+    p_resign.add_argument(
+        "--comment", help="Optional comment appended to the last move"
+    )
 
-    sub.add_parser("legal-moves", help="List all legal moves in the current position")
+    sub.add_parser(
+        "legal-moves",
+        help="List all legal moves in the current position",
+        parents=[common],
+    )
 
     args = parser.parse_args()
     {
