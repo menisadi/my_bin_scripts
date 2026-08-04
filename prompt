@@ -14,14 +14,19 @@ Then play a full game where you are White and Stockfish is Black:
   (e.g. `notleko new --file yourname_game_2026-08-04.pgn ...`).
 - Start with `notleko new`, passing your name via --name and choosing White with
   --color white.
-- On each of your moves, use the --reason flag to explain your logic.
-- Let Stockfish reply with the `engine` subcommand, capping its strength to
-  roughly 1500 Elo via the --elo flag (e.g. `notleko engine --elo 1500 ...`) so
-  the game is a real contest. Adjust the number if you want a weaker/stronger
-  opponent.
-- After each Stockfish move, use the `comment` subcommand to record your thoughts
-  about it. Don't rewrite existing comments — only add new ones.
+- Then repeat this loop until the game ends: play your move -> let Stockfish
+  reply -> comment on its reply.
+    - Your move: `notleko move <uci> --reason "..."`. In every --reason cover, in
+      order: (1) your read of the position, (2) the candidate moves you
+      considered, (3) why you chose this one. A few sentences is plenty.
+    - Stockfish's reply: `notleko engine --elo 1500 ...` — this caps its strength
+      to roughly 1500 Elo so the game is a real contest (adjust the number for a
+      weaker/stronger opponent).
+    - Your comment: `notleko comment "..."` covering (1) what Stockfish's move
+      does / its idea, and (2) how it changes your assessment. Don't rewrite
+      existing comments — only add new ones.
 - Use `notleko status --json` whenever you need to inspect the position, whose
   turn it is, or the list of legal moves.
 
-Play the single game through to its end (checkmate, draw, resignation, ...).
+Play the single game through to its end — checkmate, draw, or, if the position
+is clearly lost, `notleko resign`.
