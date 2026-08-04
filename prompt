@@ -1,0 +1,25 @@
+I have here a cool CLI named notleko. I want you to use it to play a game against Stockfish.
+
+First, get familiar with the commands:
+    notleko --help
+    notleko new --help
+    notleko move --help
+    notleko engine --help
+    notleko comment --help
+
+Then play a full game where you are White and Stockfish is Black:
+
+- Store the game in a file named {yourname}_game_{YYYY-MM-DD}.pgn. Pass this file
+  to every command with the --file flag, placed AFTER the subcommand
+  (e.g. `notleko new --file yourname_game_2026-08-04.pgn ...`).
+- Start with `notleko new`, passing your name via --name and choosing White with
+  --color white.
+- On each of your moves, use the --reason flag to explain your logic.
+- Let Stockfish reply with the `engine` subcommand, limiting its skill to 1 via
+  the --skill flag (e.g. `notleko engine --skill 1 ...`).
+- After each Stockfish move, use the `comment` subcommand to record your thoughts
+  about it. Don't rewrite existing comments — only add new ones.
+- Use `notleko status --json` whenever you need to inspect the position, whose
+  turn it is, or the list of legal moves.
+
+Play the single game through to its end (checkmate, draw, resignation, ...).
