@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# bin-usage — show how many times each script in a directory has been run
+#
+# Cross-references the extensionless executables in a directory (default:
+# ~/bin) against atuin's command history stats, printing a table sorted by
+# usage count, most-used first.
+#
+# Usage: bin-usage [directory]
+
+set -euo pipefail
+IFS=$'\n\t'
+
+usage() {
+    printf 'Usage: %s [directory]\n\n' "$(basename "$0")"
+    printf 'Show how many times each extensionless executable in <directory>\n'
+    printf '(default: ~/bin) has been run, per atuin command history.\n\n'
+    printf 'Arguments:\n'
+    printf '  directory   Directory to scan (default: ~/bin)\n\n'
+    printf 'Options:\n'
+    printf '  -h, --help  Show this help message\n\n'
+    printf 'Requires: fd, rg, atuin\n'
+}
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "$@"; exit 1; }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+target_dir="${1:-${HOME}/bin}"
+
+for tool in fd rg atuin; do
+    command -v "${tool}" &>/dev/null || _die "Missing required tool: ${tool}"
+done
+
+[[ -d "${target_dir}" ]] || _die "Not a directory: ${target_dir}"
+
+# atuin groups history by first word (the command run); -c must be large
+# enough to cover every distinct command atuin knows about, not just the
+# top N we care about.
+awk 'NR==FNR { counts[$2] = $1; next } { print (($1 in counts) ? counts[$1] : 0), $1 }' \
+    <(atuin stats -c 20000 \
+        | sed -E 's/\x1b\[[0-9;]*m//g' \
+        | rg -o '\]\s*([0-9]+)\s+(\S+)' -r '$1 $2') \
+    <(fd --type f --exclude '*.*' --max-depth 1 . "${target_dir}" \
+        | xargs -I{} sh -c 'test -x "{}" && basename "{}"') \
+    | sort -rn
