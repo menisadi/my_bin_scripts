@@ -288,7 +288,21 @@ def cmd_engine(args: argparse.Namespace) -> None:
         console.print(f"[red]Cannot start engine: {e}[/red]")
         sys.exit(1)
 
-    if args.skill < 20:
+    if args.elo is not None:
+        if "UCI_LimitStrength" in engine.options and "UCI_Elo" in engine.options:
+            bounds = engine.options["UCI_Elo"]
+            elo = max(bounds.min, min(args.elo, bounds.max))
+            if elo != args.elo:
+                console.print(
+                    f"[yellow]Requested Elo {args.elo} is outside this engine's "
+                    f"range [{bounds.min}, {bounds.max}] — using {elo}.[/yellow]"
+                )
+            engine.configure({"UCI_LimitStrength": True, "UCI_Elo": elo})
+        else:
+            console.print(
+                "[yellow]Warning: this engine does not support UCI_Elo — playing at full strength.[/yellow]"
+            )
+    elif args.skill < 20:
         if "Skill Level" in engine.options:
             engine.configure({"Skill Level": args.skill})
         else:
@@ -296,8 +310,13 @@ def cmd_engine(args: argparse.Namespace) -> None:
                 "[yellow]Warning: this engine does not support Skill Level — playing at full strength.[/yellow]"
             )
 
+    if args.movetime is not None:
+        limit = chess.engine.Limit(time=args.movetime / 1000)
+    else:
+        limit = chess.engine.Limit(depth=args.depth)
+
     try:
-        result = engine.play(board, chess.engine.Limit(depth=args.depth))
+        result = engine.play(board, limit)
         move = result.move
         san = board.san(move)
         game.end().add_variation(move)
@@ -436,6 +455,20 @@ def main() -> None:
         default=20,
         metavar="0-20",
         help="Engine skill level 0 (weakest) to 20 (strongest, default)",
+    )
+    p_engine.add_argument(
+        "--elo",
+        type=int,
+        default=None,
+        help="Cap strength to an approximate Elo via UCI_LimitStrength "
+        "(clamped to the engine's supported range); overrides --skill",
+    )
+    p_engine.add_argument(
+        "--movetime",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="Search time per move in milliseconds (default: search by --depth)",
     )
 
     p_comment = sub.add_parser(
