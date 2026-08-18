@@ -11,7 +11,9 @@ Parse these from the invocation text (e.g. `/notleko elo=1800 reasoning=off`).
 Both are optional; if omitted, use the defaults below.
 
 - `elo=<number>` — Stockfish strength cap for `notleko engine --elo`.
-  Default: `1500`.
+  Default: no cap (full-strength Stockfish). `elo=0` also means no cap, so
+  it stays the "full strength" spelling even if the default above changes
+  later.
 - `reasoning=on|off` — whether to explain your moves. Default: `on`.
   - `on`: current behavior — every move includes `--reason`, and you add a
     `notleko comment` after each Stockfish reply (see below).
@@ -42,8 +44,9 @@ Then play a full game where you are White and Stockfish is Black:
     `reasoning=on`. In every `--reason` cover, in order: (1) your read of the
     position, (2) the candidate moves you considered, (3) why you chose this
     one. A few sentences is plenty.
-  - Stockfish's reply: `notleko engine --elo <elo> ...` — caps its strength
-    to the requested Elo so the game is a real contest.
+  - Stockfish's reply: `notleko engine ...` — if `elo` is set and nonzero,
+    add `--elo <elo>` to cap its strength to the requested Elo; otherwise
+    omit `--elo` entirely to let Stockfish play at full strength.
   - Your comment (only if `reasoning=on`): `notleko comment "..."` covering
     (1) what Stockfish's move does / its idea, and (2) how it changes your
     assessment. Don't rewrite existing comments — only add new ones.
