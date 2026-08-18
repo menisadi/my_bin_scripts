@@ -36,6 +36,9 @@ Then play a full game where you are White and Stockfish is Black:
 - Store the game in a file named `{yourname}_game_{YYYY-MM-DD}.pgn`. Pass this
   file to every command with the `--file` flag, placed AFTER the subcommand
   (e.g. `notleko new --file yourname_game_2026-08-04.pgn ...`).
+- Also pass `--no-board` to every `new`/`status`/`move`/`engine` call — the
+  drawn board is for human eyes; you already get the FEN and legal moves from
+  `status --json`, so the board is just wasted output for you.
 - Start with `notleko new`, passing your name via `--name` and choosing White
   with `--color white`.
 - Then repeat this loop until the game ends: play your move -> let Stockfish
