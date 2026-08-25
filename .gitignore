@@ -1,5 +1,15 @@
 *.csv
 *.pgn
+# Call recordings and their transcripts - never commit private audio.
+*.opus
+*.m4a
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.aac
+*.amr
+*.srt
 *.pdf
 *.html
 /.vibemark.json
