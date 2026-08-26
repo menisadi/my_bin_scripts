@@ -8,10 +8,13 @@ IFS=$'\n\t'
 
 readonly PROGRAM_NAME="${0##*/}"
 
-model_path="${CALLTOPIC_MODEL:-${HOME}/.local/share/mlx/DictaLM-3.0-1.7B-Instruct-bf16}"
+model_path_he="${CALLTOPIC_MODEL_HE:-${HOME}/.local/share/mlx/DictaLM-3.0-1.7B-Instruct-bf16}"
+model_path_en="${CALLTOPIC_MODEL_EN:-mlx-community/Qwen3-4B-4bit-DWQ-053125}"
+model_path="${CALLTOPIC_MODEL:-}"
 calls_dir="${CALLTOPIC_CALLS_DIR:-${HOME}/Recordings/calls}"
 index_path="${CALLTOPIC_INDEX:-${calls_dir}/index.md}"
 max_tokens="${CALLTOPIC_MAX_TOKENS:-25}"
+lang="${CALLTOPIC_LANG:-he}"
 
 use_latest="false"
 dry_run="false"
@@ -20,9 +23,14 @@ quiet="false"
 # Locked in after comparing models/prompts on real transcripts: a short,
 # example-anchored instruction keeps output to an actual tag instead of a
 # full sentence, which longer "tagline" framings failed to do reliably.
-readonly PROMPT_PREFIX="תן תגית נושא קצרה לשיחה הבאה (עד 5 מילים, לא משפט, בלי הסברים). לדוגמה: 'תיאום מפגש', 'תקלה בקוד', 'שיחת חולין'.
+readonly PROMPT_PREFIX_HE="תן תגית נושא קצרה לשיחה הבאה (עד 5 מילים, לא משפט, בלי הסברים). לדוגמה: 'תיאום מפגש', 'תקלה בקוד', 'שיחת חולין'.
 
 שיחה:
+"
+
+readonly PROMPT_PREFIX_EN="Give a short topic tag for the following call transcript (up to 5 words, not a sentence, no explanations). Example: 'sync meeting', 'code bug', 'casual chat'.
+
+Transcript:
 "
 
 _warn() { printf '%s\n' "$*" >&2; }
@@ -41,7 +49,8 @@ If given a recording path instead of a .txt file, the transcript is assumed
 to sit next to it with the same base name (as callscribe writes it).
 
 Options:
-  -m, --model PATH   MLX model to use (default: ${model_path})
+  -m, --model PATH   MLX model to use (overrides --lang's default model)
+  -l, --lang LANG    Transcript/tag language: he or en (default: ${lang})
       --index PATH   Markdown index file to append to (default: ${index_path})
       --last         Use the newest transcript in the calls directory
       --dry-run      Print the tag without touching the index
@@ -49,7 +58,10 @@ Options:
   -h, --help         Show this help
 
 Environment:
-  CALLTOPIC_MODEL       Default MLX model path
+  CALLTOPIC_MODEL       MLX model path, overrides --lang's default entirely
+  CALLTOPIC_MODEL_HE    Default MLX model for --lang he (default: ${model_path_he})
+  CALLTOPIC_MODEL_EN    Default MLX model for --lang en (default: ${model_path_en})
+  CALLTOPIC_LANG        Default --lang value (default: he)
   CALLTOPIC_CALLS_DIR   Directory searched by --last (default: ${calls_dir})
   CALLTOPIC_INDEX       Default index file path
   CALLTOPIC_MAX_TOKENS  Generation token budget (default: ${max_tokens})
@@ -81,27 +93,40 @@ _newest_transcript() {
     | cut -d' ' -f2-
 }
 
-# Strip wrapping quotes and a leading "תגית נושא:"/"שיחה:"-style prefix that
-# the model sometimes adds despite the prompt's instructions.
+# Strip markdown bold, wrapping quotes, and a leading "תגית נושא:"/"Topic:"-style
+# prefix that the model sometimes adds despite the prompt's instructions.
 _clean_tag() {
   sed -E "
     s/^[[:space:]]+//
     s/[[:space:]]+\$//
+    s/\*//g
+    s/^[[:space:]]+//
+    s/[[:space:]]+\$//
     s/^['\"]//
     s/['\"]\$//
-    s/^(תגית נושא|נושא השיחה|נושא|שיחה)[[:space:]]*:[[:space:]]*//
+    s/^(תגית נושא|נושא השיחה|נושא|שיחה|[Tt]opic tag|[Tt]opic)[[:space:]]*:[[:space:]]*//
+    s/^['\"]//
+    s/['\"]\$//
+    s/^[[:space:]]+//
+    s/[[:space:]]+\$//
   "
 }
 
 generate_tag() {
   local transcript_file="$1"
-  local prompt tag
+  local prompt tag prompt_prefix
 
-  prompt="${PROMPT_PREFIX}$(cat "${transcript_file}")"
+  case "${lang}" in
+    en) prompt_prefix="${PROMPT_PREFIX_EN}" ;;
+    *) prompt_prefix="${PROMPT_PREFIX_HE}" ;;
+  esac
+
+  prompt="${prompt_prefix}$(cat "${transcript_file}")"
 
   tag="$(mlx_lm.generate \
     --model "${model_path}" \
     --max-tokens "${max_tokens}" \
+    --chat-template-config '{"enable_thinking": false}' \
     --prompt "${prompt}" 2>/dev/null \
     | sed -n '/^==========$/,/^==========$/p' \
     | sed '1d;$d' \
@@ -154,6 +179,7 @@ main() {
     case "$1" in
       -h|--help) usage; exit 0 ;;
       -m|--model) model_path="${2:?--model needs a path}"; shift 2 ;;
+      -l|--lang) lang="${2:?--lang needs he or en}"; shift 2 ;;
       --index) index_path="${2:?--index needs a path}"; shift 2 ;;
       --last) use_latest="true"; shift ;;
       --dry-run) dry_run="true"; shift ;;
@@ -182,7 +208,24 @@ main() {
     exit 1
   fi
 
-  [[ -d "${model_path}" || -f "${model_path}" ]] || _die "model not found: ${model_path}"
+  case "${lang}" in
+    he|en) ;;
+    *) _die "unsupported language: ${lang} (expected he or en)" ;;
+  esac
+
+  if [[ -z "${model_path}" ]]; then
+    if [[ "${lang}" == "en" ]]; then
+      model_path="${model_path_en}"
+    else
+      model_path="${model_path_he}"
+    fi
+  fi
+
+  # A local filesystem path must exist; a bare "org/repo" HF id is left for
+  # mlx_lm.generate to resolve from its own cache.
+  if [[ "${model_path}" == /* || "${model_path}" == .* ]]; then
+    [[ -d "${model_path}" || -f "${model_path}" ]] || _die "model not found: ${model_path}"
+  fi
 
   local input transcript_file
   for input in "${inputs[@]}"; do
