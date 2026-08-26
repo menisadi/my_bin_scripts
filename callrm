@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+#
+# callrm - remove a call recording, its transcript, and its row in the
+#          calltopic index, together, with a confirmation prompt.
+#
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly PROGRAM_NAME="${0##*/}"
+
+calls_dir="${CALLRM_CALLS_DIR:-${HOME}/Recordings/calls}"
+index_path="${CALLRM_INDEX:-${calls_dir}/index.md}"
+
+force="false"
+permanent="false"
+dry_run="false"
+quiet="false"
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "${PROGRAM_NAME}: $*"; exit 1; }
+_info() { [[ "${quiet}" == "true" ]] || _warn "$*"; }
+
+usage() {
+  cat <<EOF
+Usage: ${PROGRAM_NAME} [options] <name> [name...]
+
+Remove a call recording, its transcript (and .srt, if any), and its row in
+the calltopic index - together, in one step.
+
+<name> is the shared base name across "<name>.opus" (or whichever
+extension), "<name>.txt", and the File column in the index. It can also be
+given as a full path to the recording or transcript; the extension is
+stripped.
+
+By default, matched files are moved to the trash (recoverable), not
+permanently deleted, and you are asked to confirm before anything happens.
+
+Options:
+      --permanent    Permanently delete instead of moving to the trash
+  -f, --force        Do not ask for confirmation
+      --dry-run      Show what would be removed without removing anything
+      --index PATH   Index file to edit (default: ${index_path})
+  -q, --quiet        Suppress progress messages
+  -h, --help         Show this help
+
+Environment:
+  CALLRM_CALLS_DIR   Directory to search for matching files (default: ${calls_dir})
+  CALLRM_INDEX       Default index file path
+EOF
+}
+
+_require() {
+  local tool
+  for tool in "$@"; do
+    command -v "${tool}" >/dev/null 2>&1 || _die "required tool not found: ${tool}"
+  done
+}
+
+_base_name() {
+  local input="$1" name
+  name="${input##*/}"
+  name="${name%.*}"
+  printf '%s\n' "${name}"
+}
+
+_matching_files() {
+  local base_name="$1"
+  find "${calls_dir}" -maxdepth 1 -name "${base_name}.*" 2>/dev/null | sort
+}
+
+# True (prints the row) when the index has an exact match on the File column.
+_index_row() {
+  local base_name="$1"
+  [[ -f "${index_path}" ]] || return 1
+  awk -F'|' -v name="${base_name}" '
+    NR > 2 {
+      file = $3
+      gsub(/^[ \t]+|[ \t]+$/, "", file)
+      if (file == name) print
+    }
+  ' "${index_path}"
+}
+
+_remove_index_row() {
+  local base_name="$1"
+  local tmp_file
+  tmp_file="$(mktemp "${index_path}.XXXXXX")"
+
+  awk -F'|' -v name="${base_name}" '
+    {
+      file = $3
+      gsub(/^[ \t]+|[ \t]+$/, "", file)
+      if (NR <= 2 || file != name) print
+    }
+  ' "${index_path}" >"${tmp_file}"
+
+  mv "${tmp_file}" "${index_path}"
+}
+
+_confirm() {
+  local prompt="$1" reply
+  [[ "${force}" == "true" ]] && return 0
+  read -r -p "${prompt} [y/N] " reply || reply=""
+  [[ "${reply}" =~ ^[Yy]$ ]]
+}
+
+remove_one() {
+  local input="$1"
+  local base_name index_row
+  local -a files=()
+
+  base_name="$(_base_name "${input}")"
+
+  while IFS= read -r -d '' file; do
+    files+=("${file}")
+  done < <(_matching_files "${base_name}" | tr '\n' '\0')
+
+  index_row="$(_index_row "${base_name}" || true)"
+
+  if [[ "${#files[@]}" -eq 0 && -z "${index_row}" ]]; then
+    _die "nothing found for '${base_name}'"
+  fi
+
+  _info "${base_name}:"
+  local file
+  for file in "${files[@]}"; do
+    _info "  file:  ${file}"
+  done
+  if [[ -n "${index_row}" ]]; then
+    _info "  index: ${index_row}"
+  else
+    _info "  index: (no matching row)"
+  fi
+
+  if [[ "${dry_run}" == "true" ]]; then
+    return 0
+  fi
+
+  _confirm "Remove the above?" || { _info "skipped ${base_name}"; return 0; }
+
+  for file in "${files[@]}"; do
+    if [[ "${permanent}" == "true" ]]; then
+      rm -f "${file}"
+    else
+      trash "${file}"
+    fi
+  done
+
+  if [[ -n "${index_row}" ]]; then
+    _remove_index_row "${base_name}"
+  fi
+
+  _info "removed ${base_name}"
+}
+
+main() {
+  local -a names=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      --permanent) permanent="true"; shift ;;
+      -f|--force) force="true"; shift ;;
+      --dry-run) dry_run="true"; shift ;;
+      --index) index_path="${2:?--index needs a path}"; shift 2 ;;
+      -q|--quiet) quiet="true"; shift ;;
+      --) shift; break ;;
+      -*) _die "unknown option: $1 (try --help)" ;;
+      *) names+=("$1"); shift ;;
+    esac
+  done
+  while [[ $# -gt 0 ]]; do
+    names+=("$1")
+    shift
+  done
+
+  if [[ "${#names[@]}" -eq 0 ]]; then
+    usage
+    exit 1
+  fi
+
+  if [[ "${permanent}" == "false" ]]; then
+    _require trash
+  fi
+
+  local name
+  for name in "${names[@]}"; do
+    remove_one "${name}"
+  done
+}
+
+main "$@"
+# vim: ft=sh

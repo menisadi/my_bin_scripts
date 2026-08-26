@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+#
+# calltopic - generate a short Hebrew topic tag for a call transcript (as
+#             written by callscribe) and append it to a searchable index.
+#
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly PROGRAM_NAME="${0##*/}"
+
+model_path="${CALLTOPIC_MODEL:-${HOME}/.local/share/mlx/DictaLM-3.0-1.7B-Instruct-bf16}"
+calls_dir="${CALLTOPIC_CALLS_DIR:-${HOME}/Recordings/calls}"
+index_path="${CALLTOPIC_INDEX:-${calls_dir}/index.md}"
+max_tokens="${CALLTOPIC_MAX_TOKENS:-25}"
+
+use_latest="false"
+dry_run="false"
+quiet="false"
+
+# Locked in after comparing models/prompts on real transcripts: a short,
+# example-anchored instruction keeps output to an actual tag instead of a
+# full sentence, which longer "tagline" framings failed to do reliably.
+readonly PROMPT_PREFIX="תן תגית נושא קצרה לשיחה הבאה (עד 5 מילים, לא משפט, בלי הסברים). לדוגמה: 'תיאום מפגש', 'תקלה בקוד', 'שיחת חולין'.
+
+שיחה:
+"
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "${PROGRAM_NAME}: $*"; exit 1; }
+_info() { [[ "${quiet}" == "true" ]] || _warn "$*"; }
+
+usage() {
+  cat <<EOF
+Usage: ${PROGRAM_NAME} [options] <transcript.txt|recording>
+       ${PROGRAM_NAME} [options] --last
+
+Generate a short Hebrew topic tag for a call transcript (written by
+callscribe) using a local model, and append it to a markdown index.
+
+If given a recording path instead of a .txt file, the transcript is assumed
+to sit next to it with the same base name (as callscribe writes it).
+
+Options:
+  -m, --model PATH   MLX model to use (default: ${model_path})
+      --index PATH   Markdown index file to append to (default: ${index_path})
+      --last         Use the newest transcript in the calls directory
+      --dry-run      Print the tag without touching the index
+  -q, --quiet        Suppress progress messages
+  -h, --help         Show this help
+
+Environment:
+  CALLTOPIC_MODEL       Default MLX model path
+  CALLTOPIC_CALLS_DIR   Directory searched by --last (default: ${calls_dir})
+  CALLTOPIC_INDEX       Default index file path
+  CALLTOPIC_MAX_TOKENS  Generation token budget (default: ${max_tokens})
+EOF
+}
+
+_require() {
+  local tool
+  for tool in "$@"; do
+    command -v "${tool}" >/dev/null 2>&1 || _die "required tool not found: ${tool}"
+  done
+}
+
+_newest_transcript() {
+  local directory="$1"
+  [[ -d "${directory}" ]] || _die "calls directory not found: ${directory}"
+
+  local -a stat_command
+  if stat -f '%m %N' . >/dev/null 2>&1; then
+    stat_command=(stat -f '%m %N')
+  else
+    stat_command=(stat -c '%Y %n')
+  fi
+
+  find "${directory}" -type f -iname '*.txt' -print0 2>/dev/null \
+    | xargs -0 "${stat_command[@]}" 2>/dev/null \
+    | sort -rn \
+    | head -n 1 \
+    | cut -d' ' -f2-
+}
+
+# Strip wrapping quotes and a leading "תגית נושא:"/"שיחה:"-style prefix that
+# the model sometimes adds despite the prompt's instructions.
+_clean_tag() {
+  sed -E "
+    s/^[[:space:]]+//
+    s/[[:space:]]+\$//
+    s/^['\"]//
+    s/['\"]\$//
+    s/^(תגית נושא|נושא השיחה|נושא|שיחה)[[:space:]]*:[[:space:]]*//
+  "
+}
+
+generate_tag() {
+  local transcript_file="$1"
+  local prompt tag
+
+  prompt="${PROMPT_PREFIX}$(cat "${transcript_file}")"
+
+  tag="$(mlx_lm.generate \
+    --model "${model_path}" \
+    --max-tokens "${max_tokens}" \
+    --prompt "${prompt}" 2>/dev/null \
+    | sed -n '/^==========$/,/^==========$/p' \
+    | sed '1d;$d' \
+    | _clean_tag)"
+
+  [[ -n "${tag}" ]] || _die "model produced no output for ${transcript_file}"
+  printf '%s\n' "${tag}"
+}
+
+_append_to_index() {
+  local recording_name="$1" tag="$2"
+  local recording_date
+
+  recording_date="$(date +%Y-%m-%d)"
+
+  if [[ ! -f "${index_path}" ]]; then
+    mkdir -p "$(dirname "${index_path}")"
+    printf '| Date | File | Topic |\n|------|------|-------|\n' >"${index_path}"
+  fi
+
+  printf '| %s | %s | %s |\n' "${recording_date}" "${recording_name}" "${tag}" >>"${index_path}"
+}
+
+process_transcript() {
+  local transcript_file="$1"
+  local base_name tag
+
+  [[ -f "${transcript_file}" ]] || _die "no such file: ${transcript_file}"
+
+  base_name="${transcript_file##*/}"
+  base_name="${base_name%.txt}"
+
+  _info "${base_name}: generating topic tag"
+  tag="$(generate_tag "${transcript_file}")"
+
+  if [[ "${dry_run}" == "true" ]]; then
+    printf '%s\n' "${tag}"
+    return 0
+  fi
+
+  _append_to_index "${base_name}" "${tag}"
+  _info "${base_name}: ${tag}"
+  _info "appended to ${index_path}"
+}
+
+main() {
+  local -a inputs=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -m|--model) model_path="${2:?--model needs a path}"; shift 2 ;;
+      --index) index_path="${2:?--index needs a path}"; shift 2 ;;
+      --last) use_latest="true"; shift ;;
+      --dry-run) dry_run="true"; shift ;;
+      -q|--quiet) quiet="true"; shift ;;
+      --) shift; break ;;
+      -*) _die "unknown option: $1 (try --help)" ;;
+      *) inputs+=("$1"); shift ;;
+    esac
+  done
+  while [[ $# -gt 0 ]]; do
+    inputs+=("$1")
+    shift
+  done
+
+  _require mlx_lm.generate sed find xargs stat
+
+  if [[ "${use_latest}" == "true" ]]; then
+    local latest
+    latest="$(_newest_transcript "${calls_dir}")"
+    [[ -n "${latest}" ]] || _die "no transcripts found in ${calls_dir}"
+    inputs+=("${latest}")
+  fi
+
+  if [[ "${#inputs[@]}" -eq 0 ]]; then
+    usage
+    exit 1
+  fi
+
+  [[ -d "${model_path}" || -f "${model_path}" ]] || _die "model not found: ${model_path}"
+
+  local input transcript_file
+  for input in "${inputs[@]}"; do
+    transcript_file="${input}"
+    if [[ "${input}" != *.txt ]]; then
+      transcript_file="${input%.*}.txt"
+    fi
+    process_transcript "${transcript_file}"
+  done
+}
+
+main "$@"
+# vim: ft=sh
