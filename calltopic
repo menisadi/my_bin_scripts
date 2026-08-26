@@ -1,241 +1,311 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["mlx-lm"]
+# ///
 #
-# calltopic - generate a short Hebrew topic tag for a call transcript (as
-#             written by callscribe) and append it to a searchable index.
+# calltopic - generate a short topic tag for a call transcript (as written by
+#             callscribe) and append it to a searchable markdown index.
 #
-set -euo pipefail
-IFS=$'\n\t'
+from __future__ import annotations
 
-readonly PROGRAM_NAME="${0##*/}"
+import argparse
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
-model_path_he="${CALLTOPIC_MODEL_HE:-${HOME}/.local/share/mlx/DictaLM-3.0-1.7B-Instruct-bf16}"
-model_path_en="${CALLTOPIC_MODEL_EN:-mlx-community/Qwen3-4B-4bit-DWQ-053125}"
-model_path="${CALLTOPIC_MODEL:-}"
-calls_dir="${CALLTOPIC_CALLS_DIR:-${HOME}/Recordings/calls}"
-index_path="${CALLTOPIC_INDEX:-${calls_dir}/index.md}"
-max_tokens="${CALLTOPIC_MAX_TOKENS:-25}"
-lang="${CALLTOPIC_LANG:-he}"
+from mlx_lm import generate, load
 
-use_latest="false"
-dry_run="false"
-quiet="false"
+PROGRAM_NAME = "calltopic"
 
-# Locked in after comparing models/prompts on real transcripts: a short,
-# example-anchored instruction keeps output to an actual tag instead of a
-# full sentence, which longer "tagline" framings failed to do reliably.
-readonly PROMPT_PREFIX_HE="תן תגית נושא קצרה לשיחה הבאה (עד 5 מילים, לא משפט, בלי הסברים). לדוגמה: 'תיאום מפגש', 'תקלה בקוד', 'שיחת חולין'.
+CALLS_DIR = Path(
+    os.environ.get("CALLTOPIC_CALLS_DIR", str(Path.home() / "Recordings" / "calls"))
+)
+INDEX_PATH = Path(os.environ.get("CALLTOPIC_INDEX", str(CALLS_DIR / "index.md")))
+MODEL_HE = os.environ.get(
+    "CALLTOPIC_MODEL_HE",
+    str(Path.home() / ".local/share/mlx/DictaLM-3.0-1.7B-Instruct-bf16"),
+)
+MODEL_EN = os.environ.get(
+    "CALLTOPIC_MODEL_EN", "mlx-community/Qwen3-4B-4bit-DWQ-053125"
+)
+DEFAULT_LANG = os.environ.get("CALLTOPIC_LANG", "he")
+MAX_TOKENS = int(os.environ.get("CALLTOPIC_MAX_TOKENS", "150"))
 
-שיחה:
-"
+# Asks for structured JSON so the result can be parsed reliably instead of
+# scraped from free text. Locked in after comparing against a plain free-text
+# prompt on real transcripts: JSON either comes back clean and parses, or
+# fails obviously and falls back (see generate_tag), rather than silently
+# producing a mangled tag.
+JSON_SYSTEM_HE = (
+    "אתה מייצר תגיות נושא קצרות לתמלולי שיחות. "
+    'ענה אך ורק באובייקט JSON בצורה {"general": "...", "specific": ["...", "..."]}. '
+    "general היא 1-2 מילים בלבד שמתארות את סוג השיחה (לדוגמה: פגישת צוות, דיבוג, סנכרון). "
+    "specific היא רשימה של תגית אחת או שתיים בדיוק (לא יותר!, 2-4 מילים כל אחת) על הנושאים "
+    "המרכזיים ביותר שנדונו, מבוסס אך ורק על התמלול. כל שדה חייב להיות קצר. "
+    "בלי markdown, בלי טקסט נוסף, רק ה-JSON עצמו."
+)
+JSON_SYSTEM_EN = (
+    "You generate short topic tags for call transcripts. "
+    'Respond with ONLY a JSON object of the form {"general": "...", "specific": ["...", "..."]}. '
+    "general is 1-2 words describing the call type (e.g. team meeting, debugging, sync). "
+    "specific is a list of exactly one or two short phrases (no more!, 2-4 words each) naming the "
+    "main subjects discussed, based only on the transcript. Every field must be short. "
+    "No markdown, no extra text, just the JSON."
+)
 
-readonly PROMPT_PREFIX_EN="Give a short topic tag for the following call transcript (up to 5 words, not a sentence, no explanations). Example: 'sync meeting', 'code bug', 'casual chat'.
+# Fallback used when the model ignores the JSON instruction (observed on long,
+# dense transcripts with a 1.7B model): ask for a single plain tag instead,
+# then pull it out of whatever the model wrote via label matching.
+FALLBACK_SYSTEM_HE = "תן תגית נושא קצרה לשיחה הבאה (עד 5 מילים, לא משפט, בלי הסברים)."
+FALLBACK_SYSTEM_EN = "Give a short topic tag for the following call transcript (up to 5 words, not a sentence, no explanations)."
 
-Transcript:
-"
+# The model sometimes answers in the "wrong" language for the fallback case,
+# so both label sets are always checked regardless of --lang.
+LABEL_WORDS = ["topic tag", "topic", "tag", "תגית נושא", "נושא השיחה", "נושא", "תגית"]
 
-_warn() { printf '%s\n' "$*" >&2; }
-_die() { _warn "${PROGRAM_NAME}: $*"; exit 1; }
-_info() { [[ "${quiet}" == "true" ]] || _warn "$*"; }
 
-usage() {
-  cat <<EOF
-Usage: ${PROGRAM_NAME} [options] <transcript.txt|recording>
-       ${PROGRAM_NAME} [options] --last
+@dataclass
+class Tag:
+    general: str
+    specific: list[str]
 
-Generate a short Hebrew topic tag for a call transcript (written by
-callscribe) using a local model, and append it to a markdown index.
+    def render(self) -> str:
+        parts = [self.general, *self.specific]
+        return ", ".join(part for part in parts if part)
 
-If given a recording path instead of a .txt file, the transcript is assumed
-to sit next to it with the same base name (as callscribe writes it).
 
-Options:
-  -m, --model PATH   MLX model to use (overrides --lang's default model)
-  -l, --lang LANG    Transcript/tag language: he or en (default: ${lang})
-      --index PATH   Markdown index file to append to (default: ${index_path})
-      --last         Use the newest transcript in the calls directory
-      --dry-run      Print the tag without touching the index
-  -q, --quiet        Suppress progress messages
-  -h, --help         Show this help
+def _warn(message: str) -> None:
+    print(message, file=sys.stderr)
 
-Environment:
-  CALLTOPIC_MODEL       MLX model path, overrides --lang's default entirely
-  CALLTOPIC_MODEL_HE    Default MLX model for --lang he (default: ${model_path_he})
-  CALLTOPIC_MODEL_EN    Default MLX model for --lang en (default: ${model_path_en})
-  CALLTOPIC_LANG        Default --lang value (default: he)
-  CALLTOPIC_CALLS_DIR   Directory searched by --last (default: ${calls_dir})
-  CALLTOPIC_INDEX       Default index file path
-  CALLTOPIC_MAX_TOKENS  Generation token budget (default: ${max_tokens})
-EOF
-}
 
-_require() {
-  local tool
-  for tool in "$@"; do
-    command -v "${tool}" >/dev/null 2>&1 || _die "required tool not found: ${tool}"
-  done
-}
+def _die(message: str) -> None:
+    _warn(f"{PROGRAM_NAME}: {message}")
+    sys.exit(1)
 
-_newest_transcript() {
-  local directory="$1"
-  [[ -d "${directory}" ]] || _die "calls directory not found: ${directory}"
 
-  local -a stat_command
-  if stat -f '%m %N' . >/dev/null 2>&1; then
-    stat_command=(stat -f '%m %N')
-  else
-    stat_command=(stat -c '%Y %n')
-  fi
+def _info(quiet: bool, message: str) -> None:
+    if not quiet:
+        _warn(message)
 
-  find "${directory}" -type f -iname '*.txt' -print0 2>/dev/null \
-    | xargs -0 "${stat_command[@]}" 2>/dev/null \
-    | sort -rn \
-    | head -n 1 \
-    | cut -d' ' -f2-
-}
 
-# Strip markdown bold, wrapping quotes, and a leading "תגית נושא:"/"Topic:"-style
-# prefix that the model sometimes adds despite the prompt's instructions.
-_clean_tag() {
-  sed -E "
-    s/^[[:space:]]+//
-    s/[[:space:]]+\$//
-    s/\*//g
-    s/^[[:space:]]+//
-    s/[[:space:]]+\$//
-    s/^['\"]//
-    s/['\"]\$//
-    s/^(תגית נושא|נושא השיחה|נושא|שיחה|[Tt]opic tag|[Tt]opic)[[:space:]]*:[[:space:]]*//
-    s/^['\"]//
-    s/['\"]\$//
-    s/^[[:space:]]+//
-    s/[[:space:]]+\$//
-  "
-}
+def _cap_words(text: str, max_words: int) -> str:
+    return " ".join(text.split()[:max_words])
 
-generate_tag() {
-  local transcript_file="$1"
-  local prompt tag prompt_prefix
 
-  case "${lang}" in
-    en) prompt_prefix="${PROMPT_PREFIX_EN}" ;;
-    *) prompt_prefix="${PROMPT_PREFIX_HE}" ;;
-  esac
+def newest_transcript(calls_dir: Path) -> Path | None:
+    if not calls_dir.is_dir():
+        _die(f"calls directory not found: {calls_dir}")
+    candidates = [
+        p for p in calls_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".txt"
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
-  prompt="${prompt_prefix}$(cat "${transcript_file}")"
 
-  tag="$(mlx_lm.generate \
-    --model "${model_path}" \
-    --max-tokens "${max_tokens}" \
-    --chat-template-config '{"enable_thinking": false}' \
-    --prompt "${prompt}" 2>/dev/null \
-    | sed -n '/^==========$/,/^==========$/p' \
-    | sed '1d;$d' \
-    | _clean_tag)"
+def build_prompt(tokenizer: object, system: str, transcript: str, label: str) -> str:
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{label}:\n{transcript}"},
+    ]
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
 
-  [[ -n "${tag}" ]] || _die "model produced no output for ${transcript_file}"
-  printf '%s\n' "${tag}"
-}
 
-_append_to_index() {
-  local recording_name="$1" tag="$2"
-  local recording_date
+def parse_json_tag(text: str) -> Tag | None:
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    general = _cap_words(str(data.get("general", "")).strip(), 3)
+    specific_raw = data.get("specific", [])
+    if not isinstance(specific_raw, list):
+        specific_raw = [specific_raw]
+    specific = [
+        _cap_words(str(item).strip(), 5) for item in specific_raw if str(item).strip()
+    ][:2]
+    if not general and not specific:
+        return None
+    return Tag(general=general, specific=specific)
 
-  recording_date="$(date +%Y-%m-%d)"
 
-  if [[ ! -f "${index_path}" ]]; then
-    mkdir -p "$(dirname "${index_path}")"
-    printf '| Date | File | Topic |\n|------|------|-------|\n' >"${index_path}"
-  fi
+def extract_plain_tag(text: str) -> str:
+    label_pattern = "|".join(re.escape(word) for word in LABEL_WORDS)
+    labeled = re.compile(rf"^(?:{label_pattern})\s*:\s*(.+)$", re.IGNORECASE)
+    for raw_line in text.splitlines():
+        line = re.sub(r"\*+", "", raw_line).strip()
+        match = labeled.match(line)
+        if match:
+            candidate = match.group(1).strip("'\" ")
+            if candidate:
+                return _cap_words(candidate, 10)
+    for raw_line in text.splitlines():
+        line = re.sub(r"\*+", "", raw_line).strip().strip("'\" ")
+        if line:
+            return _cap_words(line, 10)
+    return ""
 
-  printf '| %s | %s | %s |\n' "${recording_date}" "${recording_name}" "${tag}" >>"${index_path}"
-}
 
-process_transcript() {
-  local transcript_file="$1"
-  local base_name tag
+def generate_tag(model: object, tokenizer: object, transcript: str, lang: str) -> Tag:
+    label = "שיחה" if lang == "he" else "Transcript"
 
-  [[ -f "${transcript_file}" ]] || _die "no such file: ${transcript_file}"
+    json_system = JSON_SYSTEM_HE if lang == "he" else JSON_SYSTEM_EN
+    prompt = build_prompt(tokenizer, json_system, transcript, label)
+    text = generate(
+        model, tokenizer, prompt=prompt, max_tokens=MAX_TOKENS, verbose=False
+    )
+    tag = parse_json_tag(text)
+    if tag is not None:
+        return tag
 
-  base_name="${transcript_file##*/}"
-  base_name="${base_name%.txt}"
+    fallback_system = FALLBACK_SYSTEM_HE if lang == "he" else FALLBACK_SYSTEM_EN
+    prompt = build_prompt(tokenizer, fallback_system, transcript, label)
+    text = generate(
+        model, tokenizer, prompt=prompt, max_tokens=MAX_TOKENS, verbose=False
+    )
+    return Tag(general=extract_plain_tag(text), specific=[])
 
-  _info "${base_name}: generating topic tag"
-  tag="$(generate_tag "${transcript_file}")"
 
-  if [[ "${dry_run}" == "true" ]]; then
-    printf '%s\n' "${tag}"
+def append_to_index(index_path: Path, recording_name: str, tag: str) -> None:
+    if not index_path.exists():
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index_path.write_text(
+            "| Date | File | Topic |\n|------|------|-------|\n", encoding="utf-8"
+        )
+    with index_path.open("a", encoding="utf-8") as handle:
+        today = datetime.now().astimezone().date().isoformat()
+        handle.write(f"| {today} | {recording_name} | {tag} |\n")
+
+
+def process_transcript(
+    model: object,
+    tokenizer: object,
+    transcript_file: Path,
+    lang: str,
+    index_path: Path,
+    dry_run: bool,
+    quiet: bool,
+) -> None:
+    if not transcript_file.is_file():
+        _die(f"no such file: {transcript_file}")
+
+    base_name = transcript_file.stem
+    _info(quiet, f"{base_name}: generating topic tag")
+
+    transcript = transcript_file.read_text(encoding="utf-8")
+    rendered = generate_tag(model, tokenizer, transcript, lang).render()
+    if not rendered:
+        _die(f"model produced no output for {transcript_file}")
+
+    if dry_run:
+        print(rendered)
+        return
+
+    append_to_index(index_path, base_name, rendered)
+    _info(quiet, f"{base_name}: {rendered}")
+    _info(quiet, f"appended to {index_path}")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM_NAME,
+        description=(
+            "Generate a short topic tag for a call transcript (written by callscribe) "
+            "using a local model, and append it to a markdown index."
+        ),
+        epilog=(
+            "If given a recording path instead of a .txt file, the transcript is assumed "
+            "to sit next to it with the same base name (as callscribe writes it).\n\n"
+            "Environment:\n"
+            "  CALLTOPIC_MODEL_HE    Default MLX model for --lang he "
+            f"(default: {MODEL_HE})\n"
+            "  CALLTOPIC_MODEL_EN    Default MLX model for --lang en "
+            f"(default: {MODEL_EN})\n"
+            f"  CALLTOPIC_LANG        Default --lang value (default: {DEFAULT_LANG})\n"
+            f"  CALLTOPIC_CALLS_DIR   Directory searched by --last (default: {CALLS_DIR})\n"
+            "  CALLTOPIC_INDEX       Default index file path\n"
+            f"  CALLTOPIC_MAX_TOKENS  Generation token budget (default: {MAX_TOKENS})"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("inputs", nargs="*", help="transcript.txt or recording path")
+    parser.add_argument(
+        "-m", "--model", help="MLX model to use (overrides --lang's default model)"
+    )
+    parser.add_argument(
+        "-l",
+        "--lang",
+        choices=["he", "en"],
+        default=DEFAULT_LANG,
+        help="transcript/tag language (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--index",
+        type=Path,
+        default=INDEX_PATH,
+        help="markdown index file to append to",
+    )
+    parser.add_argument(
+        "--last",
+        action="store_true",
+        help="use the newest transcript in the calls directory",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the tag without touching the index",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="suppress progress messages"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    inputs = list(args.inputs)
+    if args.last:
+        latest = newest_transcript(CALLS_DIR)
+        if latest is None:
+            _die(f"no transcripts found in {CALLS_DIR}")
+        inputs.append(str(latest))
+
+    if not inputs:
+        parse_args(["--help"])
+        return 1
+
+    model_path = args.model or (MODEL_EN if args.lang == "en" else MODEL_HE)
+    _info(args.quiet, f"loading model: {model_path}")
+    try:
+        model, tokenizer = load(model_path)
+    except Exception as exc:  # noqa: BLE001 - mlx_lm/huggingface_hub raise a mix of
+        # exception types for a bad path/repo; surface one clean error instead of a trace
+        _die(f"failed to load model {model_path}: {exc}")
+
+    for raw_input in inputs:
+        path = Path(raw_input)
+        transcript_file = path if path.suffix == ".txt" else path.with_suffix(".txt")
+        process_transcript(
+            model,
+            tokenizer,
+            transcript_file,
+            args.lang,
+            args.index,
+            args.dry_run,
+            args.quiet,
+        )
+
     return 0
-  fi
 
-  _append_to_index "${base_name}" "${tag}"
-  _info "${base_name}: ${tag}"
-  _info "appended to ${index_path}"
-}
 
-main() {
-  local -a inputs=()
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -h|--help) usage; exit 0 ;;
-      -m|--model) model_path="${2:?--model needs a path}"; shift 2 ;;
-      -l|--lang) lang="${2:?--lang needs he or en}"; shift 2 ;;
-      --index) index_path="${2:?--index needs a path}"; shift 2 ;;
-      --last) use_latest="true"; shift ;;
-      --dry-run) dry_run="true"; shift ;;
-      -q|--quiet) quiet="true"; shift ;;
-      --) shift; break ;;
-      -*) _die "unknown option: $1 (try --help)" ;;
-      *) inputs+=("$1"); shift ;;
-    esac
-  done
-  while [[ $# -gt 0 ]]; do
-    inputs+=("$1")
-    shift
-  done
-
-  _require mlx_lm.generate sed find xargs stat
-
-  if [[ "${use_latest}" == "true" ]]; then
-    local latest
-    latest="$(_newest_transcript "${calls_dir}")"
-    [[ -n "${latest}" ]] || _die "no transcripts found in ${calls_dir}"
-    inputs+=("${latest}")
-  fi
-
-  if [[ "${#inputs[@]}" -eq 0 ]]; then
-    usage
-    exit 1
-  fi
-
-  case "${lang}" in
-    he|en) ;;
-    *) _die "unsupported language: ${lang} (expected he or en)" ;;
-  esac
-
-  if [[ -z "${model_path}" ]]; then
-    if [[ "${lang}" == "en" ]]; then
-      model_path="${model_path_en}"
-    else
-      model_path="${model_path_he}"
-    fi
-  fi
-
-  # A local filesystem path must exist; a bare "org/repo" HF id is left for
-  # mlx_lm.generate to resolve from its own cache.
-  if [[ "${model_path}" == /* || "${model_path}" == .* ]]; then
-    [[ -d "${model_path}" || -f "${model_path}" ]] || _die "model not found: ${model_path}"
-  fi
-
-  local input transcript_file
-  for input in "${inputs[@]}"; do
-    transcript_file="${input}"
-    if [[ "${input}" != *.txt ]]; then
-      transcript_file="${input%.*}.txt"
-    fi
-    process_transcript "${transcript_file}"
-  done
-}
-
-main "$@"
-# vim: ft=sh
+if __name__ == "__main__":
+    sys.exit(main())
