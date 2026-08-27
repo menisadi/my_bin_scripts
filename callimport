@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+#
+# callimport - copy new call recordings out of the Syncthing-synced
+#              SyncedRecs folder into the calls directory, then transcribe
+#              and topic-tag each one. Originals are left in place (the
+#              SyncedRecs folder is receive-only, so deleting from it risks
+#              Syncthing reintroducing or losing the recording on the phone).
+#              A recording already carrying a transcript in the calls
+#              directory is treated as already handled and skipped.
+#
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly PROGRAM_NAME="${0##*/}"
+
+calls_dir="${CALLIMPORT_CALLS_DIR:-${HOME}/Recordings/calls}"
+source_dirs=(
+  "${HOME}/Recordings/SyncedRecs/incoming"
+  "${HOME}/Recordings/SyncedRecs/outgoing"
+)
+
+dry_run="false"
+quiet="false"
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "${PROGRAM_NAME}: $*"; exit 1; }
+_info() { [[ "${quiet}" == "true" ]] || _warn "$*"; }
+
+usage() {
+  cat <<EOF
+Usage: ${PROGRAM_NAME} [options]
+
+Copy each *.opus recording out of SyncedRecs's incoming/outgoing folders into
+the calls directory, then run callscribe and calltopic on it there. Originals
+are left in SyncedRecs. Recordings that already have a transcript in the
+calls directory are skipped, so it's safe to re-run as new recordings arrive.
+
+Options:
+      --dry-run   List what would be copied without copying or processing
+  -q, --quiet     Suppress progress messages
+  -h, --help      Show this help
+
+Environment:
+  CALLIMPORT_CALLS_DIR   Destination directory (default: ${calls_dir})
+EOF
+}
+
+_require() {
+  local tool
+  for tool in "$@"; do
+    command -v "${tool}" >/dev/null 2>&1 || _die "required tool not found: ${tool}"
+  done
+}
+
+main() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      --dry-run) dry_run="true"; shift ;;
+      -q|--quiet) quiet="true"; shift ;;
+      *) _die "unknown argument: $1 (try --help)" ;;
+    esac
+  done
+
+  _require callscribe calltopic find
+
+  local -a extra_flags=()
+  [[ "${quiet}" == "true" ]] && extra_flags+=(-q)
+
+  mkdir -p "${calls_dir}"
+
+  local -a recordings=()
+  local source_dir recording
+  for source_dir in "${source_dirs[@]}"; do
+    [[ -d "${source_dir}" ]] || continue
+    while IFS= read -r -d '' recording; do
+      recordings+=("${recording}")
+    done < <(find "${source_dir}" -maxdepth 1 -iname '*.opus' -print0)
+  done
+
+  local total="${#recordings[@]}" processed=0 dest transcript
+  for recording in "${recordings[@]}"; do
+    processed=$((processed + 1))
+    dest="${calls_dir}/${recording##*/}"
+    transcript="${dest%.*}.txt"
+    if [[ -e "${transcript}" ]]; then
+      _info "[${processed}/${total}] already handled, skipping: ${recording##*/}"
+      continue
+    fi
+    if [[ "${dry_run}" == "true" ]]; then
+      _info "[${processed}/${total}] would copy: ${recording} -> ${dest}"
+      continue
+    fi
+    _info "[${processed}/${total}] copying: ${recording##*/}"
+    cp -n "${recording}" "${dest}"
+    callscribe "${extra_flags[@]}" "${dest}"
+    calltopic "${extra_flags[@]}" "${dest}"
+  done
+}
+
+main "$@"
+# vim: ft=sh
