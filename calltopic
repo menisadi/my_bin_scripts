@@ -78,6 +78,36 @@ class Tag:
         return ", ".join(part for part in parts if part)
 
 
+@dataclass
+class CallInfo:
+    date: str
+    time: str
+    contact: str
+    phone: str
+
+
+# Recorder-produced names look like "[Contact]_[Phone]_YYYY-MM-DD_HH-MM-SS",
+# e.g. "[הדס כהן]_[0526627050]_2026-08-24_13-53-21". callscribe carries this
+# name through unchanged onto the transcript, so it's still there to parse.
+FILENAME_PATTERN = re.compile(
+    r"^\[(?P<contact>[^\]]+)\]_\[(?P<phone>[^\]]+)\]_"
+    r"(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})$"
+)
+
+
+def parse_call_info(base_name: str) -> CallInfo:
+    match = FILENAME_PATTERN.match(base_name)
+    if match is None:
+        today = datetime.now().astimezone().date().isoformat()
+        return CallInfo(date=today, time="", contact="", phone="")
+    return CallInfo(
+        date=match.group("date"),
+        time=match.group("time").replace("-", ":"),
+        contact=match.group("contact"),
+        phone=match.group("phone"),
+    )
+
+
 def _warn(message: str) -> None:
     print(message, file=sys.stderr)
 
@@ -174,15 +204,21 @@ def generate_tag(model: object, tokenizer: object, transcript: str, lang: str) -
     return Tag(general=extract_plain_tag(text), specific=[])
 
 
-def append_to_index(index_path: Path, recording_name: str, tag: str) -> None:
+def append_to_index(
+    index_path: Path, recording_name: str, tag: str, call_info: CallInfo
+) -> None:
     if not index_path.exists():
         index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text(
-            "| Date | File | Topic |\n|------|------|-------|\n", encoding="utf-8"
+            "| Date | Time | Contact | Phone | File | Topic |\n"
+            "|------|------|---------|-------|------|-------|\n",
+            encoding="utf-8",
         )
     with index_path.open("a", encoding="utf-8") as handle:
-        today = datetime.now().astimezone().date().isoformat()
-        handle.write(f"| {today} | {recording_name} | {tag} |\n")
+        handle.write(
+            f"| {call_info.date} | {call_info.time} | {call_info.contact} | "
+            f"{call_info.phone} | {recording_name} | {tag} |\n"
+        )
 
 
 def process_transcript(
@@ -209,7 +245,7 @@ def process_transcript(
         print(rendered)
         return
 
-    append_to_index(index_path, base_name, rendered)
+    append_to_index(index_path, base_name, rendered, parse_call_info(base_name))
     _info(quiet, f"{base_name}: {rendered}")
     _info(quiet, f"appended to {index_path}")
 

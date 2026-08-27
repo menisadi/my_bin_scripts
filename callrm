@@ -74,7 +74,7 @@ _index_row() {
   [[ -f "${index_path}" ]] || return 1
   awk -F'|' -v name="${base_name}" '
     NR > 2 {
-      file = $3
+      file = $6
       gsub(/^[ \t]+|[ \t]+$/, "", file)
       if (file == name) print
     }
@@ -88,7 +88,7 @@ _remove_index_row() {
 
   awk -F'|' -v name="${base_name}" '
     {
-      file = $3
+      file = $6
       gsub(/^[ \t]+|[ \t]+$/, "", file)
       if (NR <= 2 || file != name) print
     }
