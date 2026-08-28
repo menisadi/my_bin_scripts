@@ -164,9 +164,15 @@ _transcribe() {
 }
 
 # Flatten whisper JSON to "from_ms<TAB>to_ms<TAB>speaker<TAB>text".
+#
+# whisper-cli occasionally writes a raw, unescaped newline inside a "text"
+# value (observed wrapping long segments), which makes the JSON invalid and
+# jq refuses to parse it. \t, \n, and \r are otherwise only ever used as
+# insignificant formatting whitespace between tokens in this output, so
+# stripping them is safe and neutralizes the stray in-string newline too.
 _segments_to_tsv() {
   local json_file="$1" speaker="$2"
-  jq -r --arg speaker "${speaker}" '
+  tr -d '\t\r\n' <"${json_file}" | jq -r --arg speaker "${speaker}" '
     .transcription[]
     | select((.text | gsub("\\s"; "")) != "")
     | [ (.offsets.from | tostring),
@@ -174,7 +180,7 @@ _segments_to_tsv() {
         $speaker,
         (.text | gsub("^\\s+|\\s+$"; "")) ]
     | @tsv
-  ' "${json_file}"
+  '
 }
 
 # Group segments into readable paragraphs: on speaker change when labelled,
