@@ -92,9 +92,11 @@ main() {
       continue
     fi
     _info "[${processed}/${total}] copying: ${recording##*/}"
-    cp -n "${recording}" "${dest}"
-    callscribe "${extra_flags[@]}" "${dest}"
-    calltopic "${extra_flags[@]}" "${dest}"
+    # Not cp -n: BSD cp (macOS) exits 1 when it skips an existing file,
+    # unlike GNU cp's exit 0, which would abort the script under set -e.
+    [[ -e "${dest}" ]] || cp "${recording}" "${dest}"
+    callscribe "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"
+    calltopic "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"
   done
 }
 
