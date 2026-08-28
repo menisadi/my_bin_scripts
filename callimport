@@ -78,6 +78,7 @@ main() {
     done < <(find "${source_dir}" -maxdepth 1 -iname '*.opus' -print0)
   done
 
+  local -a failures=()
   local total="${#recordings[@]}" processed=0 dest transcript
   for recording in "${recordings[@]}"; do
     processed=$((processed + 1))
@@ -95,9 +96,27 @@ main() {
     # Not cp -n: BSD cp (macOS) exits 1 when it skips an existing file,
     # unlike GNU cp's exit 0, which would abort the script under set -e.
     [[ -e "${dest}" ]] || cp "${recording}" "${dest}"
-    callscribe "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"
-    calltopic "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"
+    # A single bad recording (e.g. no speech detected) shouldn't abort the
+    # whole batch; log it and move on to the rest.
+    if ! callscribe "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"; then
+      _warn "${PROGRAM_NAME}: callscribe failed on ${recording##*/}, skipping"
+      failures+=("${recording##*/}")
+      continue
+    fi
+    if ! calltopic "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"; then
+      _warn "${PROGRAM_NAME}: calltopic failed on ${recording##*/}, skipping"
+      failures+=("${recording##*/}")
+      continue
+    fi
   done
+
+  if [[ "${#failures[@]}" -gt 0 ]]; then
+    _warn "failed (${#failures[@]}):"
+    local failure
+    for failure in "${failures[@]}"; do
+      _warn "  ${failure}"
+    done
+  fi
 }
 
 main "$@"
