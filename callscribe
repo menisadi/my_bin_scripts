@@ -170,9 +170,15 @@ _transcribe() {
 # jq refuses to parse it. \t, \n, and \r are otherwise only ever used as
 # insignificant formatting whitespace between tokens in this output, so
 # stripping them is safe and neutralizes the stray in-string newline too.
+#
+# LC_ALL=C: under a UTF-8 locale, macOS's tr validates the whole input as
+# UTF-8 and aborts with "Illegal byte sequence" on the odd malformed byte
+# from whisper-cli, truncating the stream. The C locale makes tr treat input
+# as raw bytes, which is fine here since -d only ever matches single-byte
+# ASCII controls and passes multi-byte UTF-8 text through untouched.
 _segments_to_tsv() {
   local json_file="$1" speaker="$2"
-  tr -d '\t\r\n' <"${json_file}" | jq -r --arg speaker "${speaker}" '
+  LC_ALL=C tr -d '\t\r\n' <"${json_file}" | jq -r --arg speaker "${speaker}" '
     .transcription[]
     | select((.text | gsub("\\s"; "")) != "")
     | [ (.offsets.from | tostring),
