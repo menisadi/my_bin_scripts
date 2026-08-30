@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # callimport - copy new call recordings out of the Syncthing-synced
-#              SyncedRecs folder into the calls directory, then transcribe
+#              PhoneRec folder into the calls directory, then transcribe
 #              and topic-tag each one. Originals are left in place (the
-#              SyncedRecs folder is receive-only, so deleting from it risks
+#              PhoneRec folder is receive-only, so deleting from it risks
 #              Syncthing reintroducing or losing the recording on the phone).
 #              A recording already carrying a transcript in the calls
 #              directory is treated as already handled and skipped.
@@ -15,8 +15,8 @@ readonly PROGRAM_NAME="${0##*/}"
 
 calls_dir="${CALLIMPORT_CALLS_DIR:-${HOME}/Recordings/calls}"
 source_dirs=(
-  "${HOME}/Recordings/SyncedRecs/incoming"
-  "${HOME}/Recordings/SyncedRecs/outgoing"
+  "${HOME}/Recordings/PhoneRec/incoming"
+  "${HOME}/Recordings/PhoneRec/outgoing"
 )
 
 dry_run="false"
@@ -30,9 +30,9 @@ usage() {
   cat <<EOF
 Usage: ${PROGRAM_NAME} [options]
 
-Copy each *.opus recording out of SyncedRecs's incoming/outgoing folders into
+Copy each *.opus recording out of PhoneRec's incoming/outgoing folders into
 the calls directory, then run callscribe and calltopic on it there. Originals
-are left in SyncedRecs. Recordings that already have a transcript in the
+are left in PhoneRec. Recordings that already have a transcript in the
 calls directory are skipped, so it's safe to re-run as new recordings arrive.
 
 Options:
