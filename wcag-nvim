@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+#
+# wcag-nvim — audit a Neovim colorscheme repo for WCAG 2.x / APCA contrast.
+#
+# Loads each colorscheme in a headless Neovim rather than parsing its source,
+# then scores every highlight group against the backgrounds it can land on.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "wcag-nvim: $*"; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: wcag-nvim [OPTIONS] [REPO]
+
+Audit the colorschemes in REPO for contrast. Every colors/*.lua and colors/*.vim
+entry is loaded in a headless Neovim and each highlight group is scored against
+the backgrounds it can appear over.
+
+REPO may be a local directory (default: .), a GitHub owner/repo shorthand, or
+any git URL. Remote repos are shallow-cloned into a cache directory.
+
+Options:
+  -s, --scheme NAME     Audit only NAME (repeatable). Default: all in colors/.
+  -b, --background WHAT dark, light, or both. Default: both.
+  -l, --level LEVEL     aa (4.5:1) or aaa (7:1) for body text. Default: aa.
+  -L, --layers WHICH    common or all background layers. Default: common.
+  -a, --all             Show passing checks and unclassified plugin groups.
+  -j, --json            Emit one JSON object per variant instead of a report.
+  -d, --dep SPEC        Extra repo to put on the runtimepath (repeatable), for
+                        schemes built on lush.nvim and similar.
+  -r, --ref REF         Branch or tag to clone. Full commit SHAs won't work
+                        with a shallow clone.
+      --refresh         Discard any cached clone and fetch again.
+  -y, --yes             Don't prompt before cloning and running a remote repo.
+      --assume-bg HEX   Background to assume for transparent schemes.
+      --setup LUA       Lua to run before :colorscheme, e.g. for setup() opts.
+      --no-color        Disable ANSI output.
+  -h, --help            Show this help.
+
+Exit status: 0 if every content-tier check meets the target ratio, else 1.
+
+Security:
+  Colorschemes are executed, not parsed, so auditing a repo runs its Lua with
+  full Neovim privileges. --clean keeps your own config out of the way but is
+  not a sandbox. You are prompted before any remote repo is cloned and run.
+
+Notes:
+  WCAG 2.x contrast is calibrated for dark-text-on-light and is a poor model
+  for the light-on-dark schemes most of these are. The APCA Lc value on each
+  row (Lc 60 ~ body text, Lc 45 ~ large/bold) is the better guide.
+
+Examples:
+  wcag-nvim ~/src/tokyonight.nvim
+  wcag-nvim folke/tokyonight.nvim -b dark
+  wcag-nvim --dep rktjmp/lush.nvim mcchrish/zenbones.nvim
+  wcag-nvim --json . | jq -r 'select(.stats.content.base_fail > 0) | .scheme'
+EOF
+}
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+lua_script="${script_dir}/wcag-nvim.lua"
+cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/wcag-nvim"
+
+repo=""
+backgrounds=""
+ref=""
+refresh=""
+assume_yes=""
+schemes=()
+deps=()
+pass_through=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -s|--scheme) schemes+=("${2:?--scheme needs a name}"); shift 2 ;;
+    -b|--background) backgrounds="${2:?--background needs a value}"; shift 2 ;;
+    -l|--level) pass_through+=(--level "${2:?--level needs a value}"); shift 2 ;;
+    -L|--layers) pass_through+=(--layers "${2:?--layers needs a value}"); shift 2 ;;
+    -d|--dep) deps+=("${2:?--dep needs a repo spec}"); shift 2 ;;
+    -r|--ref) ref="${2:?--ref needs a branch or tag}"; shift 2 ;;
+    -a|--all) pass_through+=(--all); shift ;;
+    -j|--json) pass_through+=(--format json); shift ;;
+    -y|--yes) assume_yes=1; shift ;;
+    --refresh) refresh=1; shift ;;
+    --assume-bg) pass_through+=(--assume-bg "${2:?--assume-bg needs a value}"); shift 2 ;;
+    --setup) pass_through+=(--setup "${2:?--setup needs Lua code}"); shift 2 ;;
+    --no-color) pass_through+=(--no-color); shift ;;
+    -*) _die "unknown option: $1 (try --help)" ;;
+    *)
+      if [[ -n "${repo}" ]]; then _die "only one repo accepted"; fi
+      repo="$1"; shift ;;
+  esac
+done
+
+command -v nvim >/dev/null 2>&1 || _die "nvim not found on PATH"
+[[ -r "${lua_script}" ]] || _die "missing ${lua_script}"
+
+# Turn a repo spec into a clone URL, or fail if it isn't a remote spec.
+_spec_url() {
+  local spec="$1"
+  if [[ "${spec}" =~ ^(https?|ssh)://|^git@ ]]; then
+    printf '%s\n' "${spec}"
+  elif [[ "${spec}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    printf 'https://github.com/%s.git\n' "${spec%.git}"
+  else
+    return 1
+  fi
+}
+
+# Where a given URL+ref gets cached, as a filesystem-safe single directory name.
+_cache_dir() {
+  local key="$1"
+  key="${key#*://}"
+  key="${key#git@}"
+  key="${key%.git}"
+  key="${key//:/\/}"
+  key="${key//[!A-Za-z0-9._-]/-}"
+  if [[ -n "$2" ]]; then key="${key}@$2"; fi
+  printf '%s/%s\n' "${cache_root}" "${key}"
+}
+
+# Resolve a spec to a local path, queueing a clone when one is needed.
+# Writes the path to the global `resolved`, since _die can't escape a subshell.
+resolved=""
+clone_urls=()
+clone_dirs=()
+_resolve() {
+  local spec="$1" spec_ref="${2:-}" url dir
+  if [[ -d "${spec}" ]]; then
+    resolved=$(cd -- "${spec}" && pwd -P)
+    return 0
+  fi
+  if ! url=$(_spec_url "${spec}"); then
+    _die "not a directory or a repo spec: ${spec}"
+  fi
+  dir=$(_cache_dir "${url}" "${spec_ref}")
+  if [[ -n "${refresh}" && -d "${dir}" ]]; then
+    rm -rf -- "${dir}"
+  fi
+  if [[ ! -d "${dir}" ]]; then
+    clone_urls+=("${url}")
+    clone_dirs+=("${dir}")
+  fi
+  resolved="${dir}"
+}
+
+_resolve "${repo:-.}" "${ref}"
+repo_path="${resolved}"
+
+dep_paths=()
+for dep in ${deps[@]+"${deps[@]}"}; do
+  _resolve "${dep}"
+  dep_paths+=("${resolved}")
+done
+
+# Executing a stranger's Lua deserves an explicit yes.
+if [[ ${#clone_urls[@]} -gt 0 ]]; then
+  if [[ -z "${assume_yes}" ]]; then
+    _warn "wcag-nvim will clone and execute Lua from:"
+    for url in "${clone_urls[@]}"; do _warn "  ${url}"; done
+    _warn ""
+    _warn "Colorschemes are run as real Neovim code, not parsed. --clean keeps your"
+    _warn "config out of it, but it is not a sandbox. Only proceed for repos you trust."
+    # -e /dev/tty isn't enough: the node can exist but not be openable.
+    if ! { exec 3< /dev/tty; } 2>/dev/null; then
+      _die "no terminal available to confirm on; re-run with --yes"
+    fi
+    printf 'Continue? [y/N] ' >&2
+    reply=""
+    read -r reply <&3 || true
+    exec 3<&-
+    case "${reply}" in
+      y|Y|yes|Yes) ;;
+      *) _die "aborted" ;;
+    esac
+  fi
+  for i in "${!clone_urls[@]}"; do
+    _warn "cloning ${clone_urls[$i]}"
+    mkdir -p -- "$(dirname -- "${clone_dirs[$i]}")"
+    git_args=(clone --depth 1 --quiet)
+    if [[ -n "${ref}" ]]; then git_args+=(--branch "${ref}"); fi
+    if ! git "${git_args[@]}" -- "${clone_urls[$i]}" "${clone_dirs[$i]}"; then
+      rm -rf -- "${clone_dirs[$i]}"
+      _die "clone failed: ${clone_urls[$i]}${ref:+ (ref ${ref}; a full commit SHA cannot be shallow-cloned)}"
+    fi
+  done
+fi
+
+[[ -d "${repo_path}/colors" ]] || _die "${repo_path} has no colors/ directory"
+
+# Discover schemes from colors/ unless the user named them explicitly.
+if [[ ${#schemes[@]} -eq 0 ]]; then
+  while IFS= read -r file; do
+    name=$(basename -- "${file}")
+    schemes+=("${name%.*}")
+  done < <(find "${repo_path}/colors" -maxdepth 1 \( -name '*.lua' -o -name '*.vim' \) | sort)
+fi
+[[ ${#schemes[@]} -gt 0 ]] || _die "no colorschemes found in ${repo_path}/colors"
+
+case "${backgrounds:-both}" in
+  both) bg_list=(dark light) ;;
+  dark) bg_list=(dark) ;;
+  light) bg_list=(light) ;;
+  *) _die "--background must be dark, light, or both" ;;
+esac
+
+for dep_path in ${dep_paths[@]+"${dep_paths[@]}"}; do
+  pass_through+=(--dep "${dep_path}")
+done
+
+# Only colorize when stdout is a terminal, unless the user forced it off.
+if [[ ! -t 1 ]]; then
+  pass_through+=(--no-color)
+fi
+COLUMNS=$(tput cols 2>/dev/null || printf '80')
+export COLUMNS
+
+status=0
+for scheme in "${schemes[@]}"; do
+  for background in "${bg_list[@]}"; do
+    # errexit would abort on the first failing variant; we want to audit all.
+    nvim --clean -l "${lua_script}" \
+      --repo "${repo_path}" \
+      --scheme "${scheme}" \
+      --background "${background}" \
+      --width "${COLUMNS}" \
+      ${pass_through[@]+"${pass_through[@]}"} || status=$?
+  done
+done
+
+exit "${status}"
