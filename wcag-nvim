@@ -52,6 +52,13 @@ Notes:
   for the light-on-dark schemes most of these are. The APCA Lc value on each
   row (Lc 60 ~ body text, Lc 45 ~ large/bold) is the better guide.
 
+  The headline score is a weighted APCA shortfall (content 60%, UI 25%,
+  secondary 15%), aggregated per tier so it does not depend on how many
+  groups a scheme defines. Tinted surfaces such as CursorLine and Visual are
+  reported but not scored, being design choices rather than defects. Bands
+  are relative to real-world schemes, which cluster around 63-86; the score
+  is a floor check and a regression signal, not a verdict on a colorscheme.
+
 Examples:
   wcag-nvim ~/src/tokyonight.nvim
   wcag-nvim folke/tokyonight.nvim -b dark
