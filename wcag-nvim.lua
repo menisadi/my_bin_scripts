@@ -247,13 +247,23 @@ local notes = {}
 local normal = resolve("Normal") or {}
 local base_bg = opts.assume_bg and parse_hex(opts.assume_bg)
   or (normal.bg and to_rgb(normal.bg))
+
+-- What was requested is not evidence of what loaded. Schemes that ship one
+-- file per flavour (rose-pine-dawn, dayfox, vimbones) ignore the requested
+-- `background` and set the option themselves, so ask the result, not the
+-- request. A real background is classified by the WCAG luminance flip point,
+-- where contrast against white equals contrast against black; the post-load
+-- option is the only signal left for a transparent scheme.
+local rendered_bg = base_bg and (luminance(base_bg) > 0.179 and "light" or "dark")
+  or vim.o.background
+
 if not base_bg then
-  base_bg = opts.background == "light" and { 255, 255, 255 } or { 0, 0, 0 }
+  base_bg = rendered_bg == "light" and { 255, 255, 255 } or { 0, 0, 0 }
   notes[#notes + 1] = ("Normal has no background (transparent scheme); assuming %s. Override with --assume-bg.")
     :format(hex(base_bg))
 end
 local base_fg = normal.fg and to_rgb(normal.fg)
-  or (opts.background == "light" and { 0, 0, 0 } or { 255, 255, 255 })
+  or (rendered_bg == "light" and { 0, 0, 0 } or { 255, 255, 255 })
 
 -- Effective fg/bg for a group, honouring `reverse` and inheriting from Normal.
 local function effective(name)
@@ -425,7 +435,8 @@ end
 local failed = stats.content.fail > 0
 
 if opts.format == "json" then
-  local out = { scheme = opts.scheme, background = opts.background, level = opts.level,
+  local out = { scheme = opts.scheme, background = rendered_bg,
+    requested_bg = opts.background, level = opts.level,
     normal = { fg = hex(base_fg), bg = hex(base_bg) }, notes = notes, stats = stats, checks = {} }
   if score then
     out.score = { value = math.floor(score + 0.5), band = band(score), deficit = {} }
@@ -461,8 +472,12 @@ end
 local function bold(s) return opts.color and ("\27[1m" .. s .. "\27[0m") or s end
 local function dim(s) return opts.color and ("\27[2m" .. s .. "\27[0m") or s end
 
+local bg_label = "background=" .. rendered_bg
+if rendered_bg ~= opts.background then
+  bg_label = bg_label .. (" (requested %s)"):format(opts.background)
+end
 io.write(("\n%s  %s  %s  %s\n"):format(
-  bold(opts.scheme), dim("background=" .. opts.background), dim(opts.level:upper()),
+  bold(opts.scheme), dim(bg_label), dim(opts.level:upper()),
   dim("layers=" .. opts.layers)))
 io.write(("  Normal  %s  %s on %s  %.2f:1  Lc %d\n\n"):format(
   swatch(base_fg, base_bg), paint(base_fg, hex(base_fg)), hex(base_bg),
