@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 #
-# callrm - remove a call recording, its transcript, and its row in the
-#          calltopic index, together, with a confirmation prompt.
+# callrm - remove a call recording, its transcript and its metadata sidecar
+#          together, with a confirmation prompt, then refresh the index.
+#
+#          The index (calls.db and the rendered index.md) is derived from the
+#          sidecars by callindex, so there is no index row to edit here:
+#          deleting the files and rebuilding is both simpler and impossible to
+#          get out of step. Matching is done by exact basename rather than a
+#          find glob, because recorder-produced names are bracketed
+#          ("[Contact]_[Phone]_...") and find would read "[1455]" as a
+#          character class matching a single one of "1", "4" or "5" - which
+#          silently matched nothing at all.
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -9,11 +18,11 @@ IFS=$'\n\t'
 readonly PROGRAM_NAME="${0##*/}"
 
 calls_dir="${CALLRM_CALLS_DIR:-${HOME}/Recordings/calls}"
-index_path="${CALLRM_INDEX:-${calls_dir}/index.md}"
 
 force="false"
 permanent="false"
 dry_run="false"
+skip_index="false"
 quiet="false"
 
 _warn() { printf '%s\n' "$*" >&2; }
@@ -24,13 +33,13 @@ usage() {
   cat <<EOF
 Usage: ${PROGRAM_NAME} [options] <name> [name...]
 
-Remove a call recording, its transcript (and .srt, if any), and its row in
-the calltopic index - together, in one step.
+Remove a call recording, its transcript, its .srt (if any) and its JSON
+metadata sidecar - together, in one step - then rebuild the index so it no
+longer lists the call.
 
 <name> is the shared base name across "<name>.opus" (or whichever
-extension), "<name>.txt", and the File column in the index. It can also be
-given as a full path to the recording or transcript; the extension is
-stripped.
+extension), "<name>.txt" and "<name>.json". It can also be given as a full
+path to any of them; the extension is stripped.
 
 By default, matched files are moved to the trash (recoverable), not
 permanently deleted, and you are asked to confirm before anything happens.
@@ -39,13 +48,12 @@ Options:
       --permanent    Permanently delete instead of moving to the trash
   -f, --force        Do not ask for confirmation
       --dry-run      Show what would be removed without removing anything
-      --index PATH   Index file to edit (default: ${index_path})
+      --no-index     Skip the index rebuild
   -q, --quiet        Suppress progress messages
   -h, --help         Show this help
 
 Environment:
   CALLRM_CALLS_DIR   Directory to search for matching files (default: ${calls_dir})
-  CALLRM_INDEX       Default index file path
 EOF
 }
 
@@ -63,38 +71,28 @@ _base_name() {
   printf '%s\n' "${name}"
 }
 
+# Every file in the calls directory whose name, minus its extension, is
+# exactly the given base name. An exact string comparison, so brackets and
+# Hebrew in the name are matched literally.
 _matching_files() {
-  local base_name="$1"
-  find "${calls_dir}" -maxdepth 1 -name "${base_name}.*" 2>/dev/null | sort
+  local base_name="$1" candidate candidate_name
+  while IFS= read -r -d '' candidate; do
+    candidate_name="${candidate##*/}"
+    if [[ "${candidate_name%.*}" == "${base_name}" ]]; then
+      printf '%s\0' "${candidate}"
+    fi
+  done < <(find "${calls_dir}" -maxdepth 1 -type f -print0)
 }
 
-# True (prints the row) when the index has an exact match on the File column.
-_index_row() {
+# The call's topic tag, for the confirmation preview, read from its sidecar.
+_call_tag() {
   local base_name="$1"
-  [[ -f "${index_path}" ]] || return 1
-  awk -F'|' -v name="${base_name}" '
-    NR > 2 {
-      file = $6
-      gsub(/^[ \t]+|[ \t]+$/, "", file)
-      if (file == name) print
-    }
-  ' "${index_path}"
-}
-
-_remove_index_row() {
-  local base_name="$1"
-  local tmp_file
-  tmp_file="$(mktemp "${index_path}.XXXXXX")"
-
-  awk -F'|' -v name="${base_name}" '
-    {
-      file = $6
-      gsub(/^[ \t]+|[ \t]+$/, "", file)
-      if (NR <= 2 || file != name) print
-    }
-  ' "${index_path}" >"${tmp_file}"
-
-  mv "${tmp_file}" "${index_path}"
+  local sidecar="${calls_dir}/${base_name}.json"
+  [[ -f "${sidecar}" ]] || return 0
+  jq -r '
+    [(.tag.general // ""), ((.tag.specific // []) | join(", "))]
+    | map(select(. != "")) | join(", ")
+  ' "${sidecar}" 2>/dev/null || true
 }
 
 _confirm() {
@@ -106,31 +104,26 @@ _confirm() {
 
 remove_one() {
   local input="$1"
-  local base_name index_row
+  local base_name tag file
   local -a files=()
 
   base_name="$(_base_name "${input}")"
 
   while IFS= read -r -d '' file; do
     files+=("${file}")
-  done < <(_matching_files "${base_name}" | tr '\n' '\0')
+  done < <(_matching_files "${base_name}")
 
-  index_row="$(_index_row "${base_name}" || true)"
-
-  if [[ "${#files[@]}" -eq 0 && -z "${index_row}" ]]; then
+  if [[ "${#files[@]}" -eq 0 ]]; then
     _die "nothing found for '${base_name}'"
   fi
 
+  tag="$(_call_tag "${base_name}")"
+
   _info "${base_name}:"
-  local file
+  [[ -n "${tag}" ]] && _info "  topic: ${tag}"
   for file in "${files[@]}"; do
     _info "  file:  ${file}"
   done
-  if [[ -n "${index_row}" ]]; then
-    _info "  index: ${index_row}"
-  else
-    _info "  index: (no matching row)"
-  fi
 
   if [[ "${dry_run}" == "true" ]]; then
     return 0
@@ -146,11 +139,8 @@ remove_one() {
     fi
   done
 
-  if [[ -n "${index_row}" ]]; then
-    _remove_index_row "${base_name}"
-  fi
-
   _info "removed ${base_name}"
+  return 0
 }
 
 main() {
@@ -162,7 +152,7 @@ main() {
       --permanent) permanent="true"; shift ;;
       -f|--force) force="true"; shift ;;
       --dry-run) dry_run="true"; shift ;;
-      --index) index_path="${2:?--index needs a path}"; shift 2 ;;
+      --no-index) skip_index="true"; shift ;;
       -q|--quiet) quiet="true"; shift ;;
       --) shift; break ;;
       -*) _die "unknown option: $1 (try --help)" ;;
@@ -179,14 +169,22 @@ main() {
     exit 1
   fi
 
-  if [[ "${permanent}" == "false" ]]; then
-    _require trash
-  fi
+  _require find jq
+  [[ "${permanent}" == "true" ]] || _require trash
+  [[ "${skip_index}" == "true" || "${dry_run}" == "true" ]] || _require callindex
 
   local name
   for name in "${names[@]}"; do
     remove_one "${name}"
   done
+
+  local -a extra_flags=()
+  [[ "${quiet}" == "true" ]] && extra_flags+=(-q)
+
+  if [[ "${dry_run}" == "false" && "${skip_index}" == "false" ]]; then
+    callindex "${extra_flags[@]+"${extra_flags[@]}"}"
+    callindex "${extra_flags[@]+"${extra_flags[@]}"}" --markdown
+  fi
 }
 
 main "$@"

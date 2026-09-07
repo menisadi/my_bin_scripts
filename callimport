@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 #
-# callimport - copy new call recordings out of the Syncthing-synced
-#              PhoneRec folder into the calls directory, then transcribe
-#              and topic-tag each one. Originals are left in place (the
-#              PhoneRec folder is receive-only, so deleting from it risks
-#              Syncthing reintroducing or losing the recording on the phone).
-#              A recording already carrying a transcript in the calls
-#              directory is treated as already handled and skipped.
+# callimport - copy new call recordings out of the Syncthing-synced PhoneRec
+#              folder into the calls directory, then transcribe, topic-tag and
+#              index each one. Originals are left in place (the PhoneRec folder
+#              is receive-only, so deleting from it risks Syncthing
+#              reintroducing or losing the recording on the phone).
+#
+#              What still needs doing is read from each call's JSON sidecar
+#              rather than guessed from which files exist. The previous rule -
+#              "a transcript exists, so this call is done" - meant a call whose
+#              transcription succeeded but whose tagging failed was skipped on
+#              every later run and never reached the index. Per-stage status
+#              makes each stage independently resumable, and the whole archive
+#              is swept every run, so a call left half-finished gets picked up
+#              the next time regardless of whether its original is still in
+#              PhoneRec.
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -14,13 +22,22 @@ IFS=$'\n\t'
 readonly PROGRAM_NAME="${0##*/}"
 
 calls_dir="${CALLIMPORT_CALLS_DIR:-${HOME}/Recordings/calls}"
-source_dirs=(
-  "${HOME}/Recordings/PhoneRec/incoming"
-  "${HOME}/Recordings/PhoneRec/outgoing"
+phonerec_dir="${CALLIMPORT_PHONEREC_DIR:-${HOME}/Recordings/PhoneRec}"
+
+# Direction is only knowable here: the recorder splits calls into these two
+# folders, and the flattened filename in the calls directory doesn't carry it.
+# "folder:direction" pairs rather than an associative array - macOS still ships
+# bash 3.2, which has none.
+SOURCE_DIRECTIONS=("incoming:in" "outgoing:out")
+
+AUDIO_PATTERN=(
+  -iname '*.opus' -o -iname '*.m4a' -o -iname '*.mp3' -o -iname '*.wav'
+  -o -iname '*.ogg' -o -iname '*.flac' -o -iname '*.aac' -o -iname '*.amr'
 )
 
 dry_run="false"
 quiet="false"
+skip_index="false"
 
 _warn() { printf '%s\n' "$*" >&2; }
 _die() { _warn "${PROGRAM_NAME}: $*"; exit 1; }
@@ -30,18 +47,25 @@ usage() {
   cat <<EOF
 Usage: ${PROGRAM_NAME} [options]
 
-Copy each *.opus recording out of PhoneRec's incoming/outgoing folders into
-the calls directory, then run callscribe and calltopic on it there. Originals
-are left in PhoneRec. Recordings that already have a transcript in the
-calls directory are skipped, so it's safe to re-run as new recordings arrive.
+Copy each new recording out of PhoneRec's incoming/outgoing folders into the
+calls directory, then bring every call in that directory up to date: write its
+metadata sidecar (callmeta), transcribe it if it has no transcript
+(callscribe), tag it if it has no topic tag (calltopic), and rebuild the
+searchable index (callindex).
+
+Each stage is skipped only when the call's sidecar says that stage already
+succeeded, so re-running is safe and a call left half-finished by an earlier
+failure is retried rather than abandoned.
 
 Options:
-      --dry-run   List what would be copied without copying or processing
-  -q, --quiet     Suppress progress messages
-  -h, --help      Show this help
+      --dry-run    Show what would be copied and which stages would run
+      --no-index   Skip the final index rebuild
+  -q, --quiet      Suppress progress messages
+  -h, --help       Show this help
 
 Environment:
-  CALLIMPORT_CALLS_DIR   Destination directory (default: ${calls_dir})
+  CALLIMPORT_CALLS_DIR      Destination directory (default: ${calls_dir})
+  CALLIMPORT_PHONEREC_DIR   Recorder folder to import from (default: ${phonerec_dir})
 EOF
 }
 
@@ -52,63 +76,144 @@ _require() {
   done
 }
 
+# Status of one pipeline stage, straight from the sidecar. Missing sidecar,
+# missing key or unreadable JSON all mean "not done", which is the safe answer:
+# the stage simply runs again.
+_stage_status() {
+  local recording="$1" stage="$2" sidecar
+  sidecar="${recording%.*}.json"
+  [[ -f "${sidecar}" ]] || { printf 'missing\n'; return 0; }
+  jq -r --arg stage "${stage}" \
+    '.stages[$stage].status // "missing"' "${sidecar}" 2>/dev/null \
+    || printf 'missing\n'
+}
+
+# Copy anything new out of PhoneRec, recording the direction as we go.
+import_new() {
+  local -a extra_flags=("$@")
+  local pair folder source_dir direction recording dest copied=0
+
+  for pair in "${SOURCE_DIRECTIONS[@]}"; do
+    folder="${pair%%:*}"
+    direction="${pair##*:}"
+    source_dir="${phonerec_dir}/${folder}"
+    [[ -d "${source_dir}" ]] || continue
+
+    while IFS= read -r -d '' recording; do
+      dest="${calls_dir}/${recording##*/}"
+      if [[ -e "${dest}" ]]; then
+        # Already imported. Refresh the sidecar anyway: while the original is
+        # still here, this is the last chance to record the direction.
+        [[ "${dry_run}" == "true" ]] && continue
+        callmeta "${extra_flags[@]+"${extra_flags[@]}"}" \
+          --direction "${direction}" "${dest}" >/dev/null
+        continue
+      fi
+      if [[ "${dry_run}" == "true" ]]; then
+        _info "would copy (${direction}): ${recording##*/}"
+        continue
+      fi
+      _info "copying (${direction}): ${recording##*/}"
+      cp "${recording}" "${dest}"
+      callmeta "${extra_flags[@]+"${extra_flags[@]}"}" \
+        --direction "${direction}" "${dest}" >/dev/null
+      copied=$((copied + 1))
+    done < <(find "${source_dir}" -maxdepth 1 -type f \( "${AUDIO_PATTERN[@]}" \) -print0)
+  done
+
+  [[ "${dry_run}" == "true" ]] || _info "copied ${copied} new recording(s)"
+}
+
+# Bring one call up to date. Returns non-zero if a stage failed, so a single
+# bad recording (e.g. no speech detected) doesn't abort the whole batch.
+finish_one() {
+  local recording="$1" position="$2"
+  local -a extra_flags=("${@:3}")
+  local base_name scribe topic
+
+  base_name="${recording##*/}"
+  base_name="${base_name%.*}"
+
+  # Refresh first so the stage status reflects what is actually on disk, not
+  # what a previous run happened to record. Skipped under --dry-run, which
+  # must not write anything - the status is then read as-is.
+  [[ "${dry_run}" == "true" ]] \
+    || callmeta "${extra_flags[@]+"${extra_flags[@]}"}" "${recording}" >/dev/null
+  scribe="$(_stage_status "${recording}" scribe)"
+  topic="$(_stage_status "${recording}" topic)"
+
+  if [[ "${scribe}" == "ok" && "${topic}" == "ok" ]]; then
+    _info "${position} up to date: ${base_name}"
+    return 0
+  fi
+
+  if [[ "${dry_run}" == "true" ]]; then
+    _info "${position} would run (scribe=${scribe} topic=${topic}): ${base_name}"
+    return 0
+  fi
+
+  if [[ "${scribe}" != "ok" ]]; then
+    _info "${position} transcribing: ${base_name}"
+    if ! callscribe "${extra_flags[@]+"${extra_flags[@]}"}" "${recording}"; then
+      _warn "${PROGRAM_NAME}: callscribe failed on ${base_name}"
+      return 1
+    fi
+    # Re-derive so the sidecar reflects the transcript that now exists; without
+    # this the call would still look untranscribed on the next run.
+    callmeta "${extra_flags[@]+"${extra_flags[@]}"}" "${recording}" >/dev/null
+  fi
+
+  if [[ "${topic}" != "ok" ]]; then
+    _info "${position} tagging: ${base_name}"
+    if ! calltopic "${extra_flags[@]+"${extra_flags[@]}"}" "${recording}"; then
+      _warn "${PROGRAM_NAME}: calltopic failed on ${base_name}"
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 main() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -h|--help) usage; exit 0 ;;
       --dry-run) dry_run="true"; shift ;;
+      --no-index) skip_index="true"; shift ;;
       -q|--quiet) quiet="true"; shift ;;
       *) _die "unknown argument: $1 (try --help)" ;;
     esac
   done
 
-  _require callscribe calltopic find
+  _require callscribe calltopic callmeta callindex find jq
 
   local -a extra_flags=()
   [[ "${quiet}" == "true" ]] && extra_flags+=(-q)
 
   mkdir -p "${calls_dir}"
 
+  import_new "${extra_flags[@]+"${extra_flags[@]}"}"
+
   local -a recordings=()
-  local source_dir recording
-  for source_dir in "${source_dirs[@]}"; do
-    [[ -d "${source_dir}" ]] || continue
-    while IFS= read -r -d '' recording; do
-      recordings+=("${recording}")
-    done < <(find "${source_dir}" -maxdepth 1 -iname '*.opus' -print0)
-  done
+  local recording
+  while IFS= read -r -d '' recording; do
+    recordings+=("${recording}")
+  done < <(find "${calls_dir}" -maxdepth 1 -type f \( "${AUDIO_PATTERN[@]}" \) -print0 | sort -z)
 
   local -a failures=()
-  local total="${#recordings[@]}" processed=0 dest transcript
+  local total="${#recordings[@]}" processed=0
   for recording in "${recordings[@]}"; do
     processed=$((processed + 1))
-    dest="${calls_dir}/${recording##*/}"
-    transcript="${dest%.*}.txt"
-    if [[ -e "${transcript}" ]]; then
-      _info "[${processed}/${total}] already handled, skipping: ${recording##*/}"
-      continue
-    fi
-    if [[ "${dry_run}" == "true" ]]; then
-      _info "[${processed}/${total}] would copy: ${recording} -> ${dest}"
-      continue
-    fi
-    _info "[${processed}/${total}] copying: ${recording##*/}"
-    # Not cp -n: BSD cp (macOS) exits 1 when it skips an existing file,
-    # unlike GNU cp's exit 0, which would abort the script under set -e.
-    [[ -e "${dest}" ]] || cp "${recording}" "${dest}"
-    # A single bad recording (e.g. no speech detected) shouldn't abort the
-    # whole batch; log it and move on to the rest.
-    if ! callscribe "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"; then
-      _warn "${PROGRAM_NAME}: callscribe failed on ${recording##*/}, skipping"
+    if ! finish_one "${recording}" "[${processed}/${total}]" \
+        "${extra_flags[@]+"${extra_flags[@]}"}"; then
       failures+=("${recording##*/}")
-      continue
-    fi
-    if ! calltopic "${extra_flags[@]+"${extra_flags[@]}"}" "${dest}"; then
-      _warn "${PROGRAM_NAME}: calltopic failed on ${recording##*/}, skipping"
-      failures+=("${recording##*/}")
-      continue
     fi
   done
+
+  if [[ "${dry_run}" == "false" && "${skip_index}" == "false" ]]; then
+    callindex "${extra_flags[@]+"${extra_flags[@]}"}"
+    callindex "${extra_flags[@]+"${extra_flags[@]}"}" --markdown
+  fi
 
   if [[ "${#failures[@]}" -gt 0 ]]; then
     _warn "failed (${#failures[@]}):"
@@ -116,6 +221,7 @@ main() {
     for failure in "${failures[@]}"; do
       _warn "  ${failure}"
     done
+    return 1
   fi
 }
 

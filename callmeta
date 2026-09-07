@@ -1,0 +1,390 @@
+#!/usr/bin/env -S uv run --script --quiet
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+#
+# callmeta - create or refresh the JSON sidecar that carries a call's
+#            metadata and per-stage pipeline status.
+#
+# The sidecar sits next to the recording as "<base>.json" and is the source
+# of truth for everything about a call that isn't the audio or the transcript
+# text. Every field except "tag" and "direction" is derived from observable
+# facts (the filename, ffprobe, whether a transcript exists), so a refresh is
+# idempotent and self-healing: it can never disagree with what's on disk.
+#
+# The pipeline stages are derived the same way rather than being flags someone
+# has to remember to set. That is the point: callimport used to treat "a .txt
+# exists" as "this call is fully handled", so a call whose transcription
+# succeeded but whose tagging failed was skipped forever and never made it
+# into the index. Deriving stage status from the transcript AND the tag
+# separately means a half-finished call is always visible as such.
+#
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+PROGRAM_NAME = "callmeta"
+
+SCHEMA_VERSION = 1
+
+CALLS_DIR = Path(
+    os.environ.get("CALLMETA_CALLS_DIR", str(Path.home() / "Recordings" / "calls"))
+)
+# Originals are left in place by callimport, so for a recording that is still
+# there the incoming/outgoing split recovers the call direction, which the
+# flattened filename in the calls directory doesn't carry.
+PHONEREC_DIR = Path(
+    os.environ.get(
+        "CALLMETA_PHONEREC_DIR", str(Path.home() / "Recordings" / "PhoneRec")
+    )
+)
+
+AUDIO_SUFFIXES = (".opus", ".m4a", ".mp3", ".wav", ".ogg", ".flac", ".aac", ".amr")
+
+# Recorder-produced names look like "[Contact]_[Phone]_YYYY-MM-DD_HH-MM-SS".
+# The phone field is whatever the recorder had on hand: a local number, an
+# E.164 number, a short code, or a plain name (e.g. "[שופרסל]_[Shufersal]").
+FILENAME_PATTERN = re.compile(
+    r"^\[(?P<contact>[^\]]*)\]_\[(?P<phone>[^\]]*)\]_"
+    r"(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}-\d{2})$"
+)
+
+# Default region for bare local numbers. Israel, matching the recorder's own
+# locale; override if the phone's address book is elsewhere.
+DEFAULT_COUNTRY_CODE = os.environ.get("CALLMETA_COUNTRY_CODE", "972")
+
+UNKNOWN_PHONES = {"", "null", "none", "unknown", "private", "anonymous"}
+
+
+def _warn(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def _die(message: str) -> None:
+    _warn(f"{PROGRAM_NAME}: {message}")
+    sys.exit(1)
+
+
+def _info(quiet: bool, message: str) -> None:
+    if not quiet:
+        _warn(message)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def normalize_phone(raw: str) -> str | None:
+    """Best-effort E.164 for a recorder-supplied phone field.
+
+    Returns None when the field plainly isn't a number, so that grouping by
+    phone never silently merges distinct non-numeric labels. Deliberately not
+    the `phonenumbers` library: this only has to collapse the one real
+    ambiguity seen in practice, the same contact appearing as both
+    "0547602488" and "+972547602488".
+    """
+    cleaned = re.sub(r"[\s\-().]", "", raw.strip())
+    if cleaned.lower() in UNKNOWN_PHONES:
+        return None
+    if cleaned.startswith("+"):
+        return cleaned if cleaned[1:].isdigit() else None
+    if not cleaned.isdigit():
+        return None
+    if cleaned.startswith("00"):
+        return f"+{cleaned[2:]}"
+    # Short codes (service numbers like 1455) have no country context and are
+    # meaningless with a prefix bolted on, so they stay as dialled.
+    if len(cleaned) <= 6:
+        return cleaned
+    if cleaned.startswith("0"):
+        return f"+{DEFAULT_COUNTRY_CODE}{cleaned[1:]}"
+    return f"+{cleaned}"
+
+
+@dataclass
+class Probe:
+    duration_seconds: float | None
+    channels: int | None
+
+
+def probe_audio(path: Path) -> Probe:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration:stream=channels",
+                "-select_streams",
+                "a:0",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
+        return Probe(duration_seconds=None, channels=None)
+
+    duration_raw = data.get("format", {}).get("duration")
+    try:
+        duration = round(float(duration_raw), 1) if duration_raw is not None else None
+    except (TypeError, ValueError):
+        duration = None
+
+    streams = data.get("streams") or [{}]
+    channels = streams[0].get("channels")
+    return Probe(duration_seconds=duration, channels=channels)
+
+
+def infer_direction(recording: Path) -> str:
+    """Direction from the surviving original, then from the contact field."""
+    for direction, folder in (("in", "incoming"), ("out", "outgoing")):
+        if (PHONEREC_DIR / folder / recording.name).exists():
+            return direction
+    match = FILENAME_PATTERN.match(recording.stem)
+    contact = (match.group("contact") if match else "").strip().lower()
+    if contact == "outgoing":
+        return "out"
+    if contact == "incoming":
+        return "in"
+    return "unknown"
+
+
+def find_recording(base: Path) -> Path | None:
+    """The audio file for a sidecar/transcript base path, if one exists."""
+    for suffix in AUDIO_SUFFIXES:
+        candidate = base.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def build_sidecar(
+    recording: Path, existing: dict, direction_override: str | None
+) -> dict:
+    base_name = recording.stem
+    transcript = recording.with_suffix(".txt")
+
+    sidecar = dict(existing)
+    sidecar["schema"] = SCHEMA_VERSION
+    sidecar["base"] = base_name
+    sidecar["recording"] = recording.name
+
+    match = FILENAME_PATTERN.match(base_name)
+    if match:
+        date = match.group("date")
+        time = match.group("time").replace("-", ":")
+        phone_raw = match.group("phone").strip()
+        sidecar["contact"] = match.group("contact").strip()
+        sidecar["phone_raw"] = phone_raw
+        sidecar["phone"] = normalize_phone(phone_raw)
+        sidecar["date"] = date
+        sidecar["time"] = time
+        sidecar["started_at"] = f"{date}T{time}"
+    else:
+        # Unparseable name: keep whatever a previous run recorded rather than
+        # blanking it, and fall back to the file's own mtime for ordering.
+        stamp = datetime.fromtimestamp(recording.stat().st_mtime).astimezone()
+        sidecar.setdefault("contact", "")
+        sidecar.setdefault("phone_raw", "")
+        sidecar.setdefault("phone", None)
+        sidecar["date"] = stamp.date().isoformat()
+        sidecar["time"] = stamp.time().isoformat(timespec="seconds")
+        sidecar["started_at"] = stamp.isoformat(timespec="seconds")
+
+    # An explicit --direction wins; otherwise never downgrade a known
+    # direction to "unknown" just because the original has since been pruned
+    # from the PhoneRec folder.
+    if direction_override:
+        sidecar["direction"] = direction_override
+    else:
+        inferred = infer_direction(recording)
+        if inferred != "unknown" or sidecar.get("direction") in (None, "unknown"):
+            sidecar["direction"] = inferred
+
+    probe = probe_audio(recording)
+    sidecar["duration_seconds"] = probe.duration_seconds
+    sidecar["channels"] = probe.channels
+
+    stages = dict(sidecar.get("stages") or {})
+
+    scribe = dict(stages.get("scribe") or {})
+    if transcript.is_file() and transcript.stat().st_size > 0:
+        words = len(transcript.read_text(encoding="utf-8").split())
+        scribe["status"] = "ok" if words else "empty"
+        scribe["words"] = words
+        scribe.setdefault("at", _now())
+        sidecar["transcript"] = transcript.name
+    else:
+        scribe["status"] = "missing"
+        scribe.pop("words", None)
+        sidecar["transcript"] = None
+    stages["scribe"] = scribe
+
+    # calltopic owns the topic stage's provenance (model, language); callmeta
+    # only ever re-derives whether a usable tag is actually present.
+    topic = dict(stages.get("topic") or {})
+    tag = sidecar.get("tag") or {}
+    has_tag = bool(str(tag.get("general", "")).strip() or tag.get("specific"))
+    topic["status"] = "ok" if has_tag else "missing"
+    stages["topic"] = topic
+
+    sidecar["stages"] = stages
+    return sidecar
+
+
+def write_sidecar(path: Path, sidecar: dict) -> None:
+    """Atomic replace, so an interrupted run can't leave a truncated sidecar."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(sidecar, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp_name, path)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+def read_sidecar(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        _die(f"malformed sidecar {path}: {exc}")
+    if not isinstance(data, dict):
+        _die(f"malformed sidecar {path}: expected a JSON object")
+    return data
+
+
+def all_recordings(calls_dir: Path) -> list[Path]:
+    if not calls_dir.is_dir():
+        _die(f"calls directory not found: {calls_dir}")
+    return sorted(
+        p
+        for p in calls_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in AUDIO_SUFFIXES
+    )
+
+
+def resolve_input(raw: str) -> Path:
+    """Accept a recording, a transcript, or a sidecar path interchangeably."""
+    path = Path(raw)
+    if path.suffix.lower() in AUDIO_SUFFIXES:
+        return path
+    recording = find_recording(path.with_suffix(""))
+    if recording is not None:
+        return recording
+    return path
+
+
+def process(recording: Path, direction: str | None, dry_run: bool, quiet: bool) -> bool:
+    if not recording.is_file():
+        _warn(f"{PROGRAM_NAME}: no such recording: {recording}")
+        return False
+
+    sidecar_path = recording.with_suffix(".json")
+    existing = read_sidecar(sidecar_path)
+    sidecar = build_sidecar(recording, existing, direction)
+
+    if dry_run:
+        print(json.dumps(sidecar, ensure_ascii=False, indent=2, sort_keys=True))
+        return True
+
+    if sidecar == existing:
+        _info(quiet, f"{recording.stem}: unchanged")
+        return True
+
+    write_sidecar(sidecar_path, sidecar)
+    stages = sidecar["stages"]
+    _info(
+        quiet,
+        f"{recording.stem}: scribe={stages['scribe']['status']} "
+        f"topic={stages['topic']['status']} wrote {sidecar_path.name}",
+    )
+    return True
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM_NAME,
+        description=(
+            "Create or refresh the JSON sidecar holding a call's metadata and "
+            "pipeline stage status. Safe to re-run: every derived field is "
+            "recomputed from the filename, ffprobe and the transcript on disk, "
+            "while the topic tag written by calltopic is preserved."
+        ),
+        epilog=(
+            "Inputs may be given as a recording, a transcript or a sidecar path; "
+            "the extension is ignored.\n\n"
+            "Environment:\n"
+            f"  CALLMETA_CALLS_DIR      Directory scanned by --all (default: {CALLS_DIR})\n"
+            f"  CALLMETA_PHONEREC_DIR   Recorder folder used to infer direction "
+            f"(default: {PHONEREC_DIR})\n"
+            f"  CALLMETA_COUNTRY_CODE   Country code for bare local numbers "
+            f"(default: {DEFAULT_COUNTRY_CODE})"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "inputs", nargs="*", help="recording, transcript or sidecar path"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="refresh a sidecar for every recording in the calls directory",
+    )
+    parser.add_argument(
+        "--direction",
+        choices=["in", "out", "unknown"],
+        help="record this call direction instead of inferring it",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the sidecar that would be written without writing it",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="suppress progress messages"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    recordings = [resolve_input(raw) for raw in args.inputs]
+    if args.all:
+        recordings.extend(all_recordings(CALLS_DIR))
+    if not recordings:
+        parse_args(["--help"])
+        return 1
+
+    failures = 0
+    for recording in recordings:
+        if not process(recording, args.direction, args.dry_run, args.quiet):
+            failures += 1
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -4,7 +4,13 @@
 # ///
 #
 # calltopic - generate a short topic tag for a call transcript (as written by
-#             callscribe) and append it to a searchable markdown index.
+#             callscribe) and record it in the call's JSON sidecar.
+#
+# The sidecar is the source of truth for the tag; the searchable index
+# (calls.db and the rendered index.md) is built from it by callindex. Writing
+# there instead of appending to a markdown table makes re-tagging a call
+# idempotent - it overwrites one field - where appending silently produced a
+# duplicate row every time.
 #
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,10 +28,12 @@ from mlx_lm import generate, load
 
 PROGRAM_NAME = "calltopic"
 
+# Sidecar layout version, kept in step with callmeta.
+SCHEMA_VERSION = 1
+
 CALLS_DIR = Path(
     os.environ.get("CALLTOPIC_CALLS_DIR", str(Path.home() / "Recordings" / "calls"))
 )
-INDEX_PATH = Path(os.environ.get("CALLTOPIC_INDEX", str(CALLS_DIR / "index.md")))
 MODEL_HE = os.environ.get(
     "CALLTOPIC_MODEL_HE",
     str(Path.home() / ".local/share/mlx/DictaLM-3.0-1.7B-Instruct-bf16"),
@@ -218,21 +227,69 @@ def generate_tag(model: object, tokenizer: object, transcript: str, lang: str) -
     return Tag(general=extract_plain_tag(text), specific=[])
 
 
-def append_to_index(
-    index_path: Path, recording_name: str, tag: str, call_info: CallInfo
+def read_sidecar(sidecar_path: Path) -> dict:
+    if not sidecar_path.is_file():
+        return {}
+    try:
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        _die(f"malformed sidecar {sidecar_path}: {exc}")
+    if not isinstance(data, dict):
+        _die(f"malformed sidecar {sidecar_path}: expected a JSON object")
+    return data
+
+
+def write_sidecar(sidecar_path: Path, sidecar: dict) -> None:
+    """Atomic replace, so an interrupted write can't truncate the sidecar."""
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=str(sidecar_path.parent), prefix=f".{sidecar_path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(sidecar, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp_name, sidecar_path)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+
+
+def record_tag(
+    sidecar_path: Path,
+    base_name: str,
+    tag: Tag,
+    call_info: CallInfo,
+    model_path: str,
+    lang: str,
 ) -> None:
-    if not index_path.exists():
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        index_path.write_text(
-            "| Date | Time | Contact | Phone | File | Topic |\n"
-            "|------|------|---------|-------|------|-------|\n",
-            encoding="utf-8",
-        )
-    with index_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"| {call_info.date} | {call_info.time} | {call_info.contact} | "
-            f"{call_info.phone} | {recording_name} | {tag} |\n"
-        )
+    """Merge the tag into the sidecar, leaving every other field untouched.
+
+    Only the fields calltopic actually owns are written. If no sidecar exists
+    yet the bare minimum is created from the filename, and callmeta fills in
+    duration, channels and direction on its next run - so the two tools can be
+    run in either order without one clobbering the other's work.
+    """
+    sidecar = read_sidecar(sidecar_path)
+    sidecar.setdefault("schema", SCHEMA_VERSION)
+    sidecar.setdefault("base", base_name)
+    sidecar.setdefault("contact", call_info.contact)
+    sidecar.setdefault("phone_raw", call_info.phone)
+    sidecar.setdefault("date", call_info.date)
+    sidecar.setdefault("time", call_info.time)
+
+    sidecar["tag"] = {"general": tag.general, "specific": tag.specific}
+
+    stages = dict(sidecar.get("stages") or {})
+    stages["topic"] = {
+        "status": "ok",
+        "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "model": model_path,
+        "lang": lang,
+    }
+    sidecar["stages"] = stages
+
+    write_sidecar(sidecar_path, sidecar)
 
 
 def process_transcript(
@@ -240,7 +297,7 @@ def process_transcript(
     tokenizer: object,
     transcript_file: Path,
     lang: str,
-    index_path: Path,
+    model_path: str,
     dry_run: bool,
     quiet: bool,
 ) -> None:
@@ -251,7 +308,8 @@ def process_transcript(
     _info(quiet, f"{base_name}: generating topic tag")
 
     transcript = transcript_file.read_text(encoding="utf-8")
-    rendered = generate_tag(model, tokenizer, transcript, lang).render()
+    tag = generate_tag(model, tokenizer, transcript, lang)
+    rendered = tag.render()
     if not rendered:
         _die(f"model produced no output for {transcript_file}")
 
@@ -259,9 +317,17 @@ def process_transcript(
         print(rendered)
         return
 
-    append_to_index(index_path, base_name, rendered, parse_call_info(base_name))
+    sidecar_path = transcript_file.with_suffix(".json")
+    record_tag(
+        sidecar_path,
+        base_name,
+        tag,
+        parse_call_info(base_name),
+        model_path,
+        lang,
+    )
     _info(quiet, f"{base_name}: {rendered}")
-    _info(quiet, f"appended to {index_path}")
+    _info(quiet, f"recorded in {sidecar_path.name}")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -269,7 +335,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         prog=PROGRAM_NAME,
         description=(
             "Generate a short topic tag for a call transcript (written by callscribe) "
-            "using a local model, and append it to a markdown index."
+            "using a local model, and record it in the call's JSON sidecar."
         ),
         epilog=(
             "If given a recording path instead of a .txt file, the transcript is assumed "
@@ -281,7 +347,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             f"(default: {MODEL_EN})\n"
             f"  CALLTOPIC_LANG        Default --lang value (default: {DEFAULT_LANG})\n"
             f"  CALLTOPIC_CALLS_DIR   Directory searched by --last (default: {CALLS_DIR})\n"
-            "  CALLTOPIC_INDEX       Default index file path\n"
             f"  CALLTOPIC_MAX_TOKENS  Generation token budget (default: {MAX_TOKENS})"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -298,12 +363,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="transcript/tag language (default: %(default)s)",
     )
     parser.add_argument(
-        "--index",
-        type=Path,
-        default=INDEX_PATH,
-        help="markdown index file to append to",
-    )
-    parser.add_argument(
         "--last",
         action="store_true",
         help="use the newest transcript in the calls directory",
@@ -311,7 +370,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the tag without touching the index",
+        help="print the tag without touching the sidecar",
     )
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="suppress progress messages"
@@ -349,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             tokenizer,
             transcript_file,
             args.lang,
-            args.index,
+            model_path,
             args.dry_run,
             args.quiet,
         )
