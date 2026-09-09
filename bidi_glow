@@ -1,0 +1,100 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["python-bidi"]
+# ///
+"""Reorder each line of stdin into terminal visual order for RTL text,
+while preserving ANSI styling (as emitted by `glow`, lipgloss, etc.).
+
+Tools like `glow` wrap nearly every styled span in its own ANSI start/reset
+codes, sometimes one span per character. Feeding a line straight into
+python-bidi's get_display() reorders those escape bytes right along with
+the visible text, scrambling them into sequences the terminal can't parse
+- which is why a naive bidi fix drops all styling.
+
+Instead, this reorders characters using the same lower-level steps
+get_display() itself calls, but first tags each character with the ANSI
+style it came from, then reconstitutes styled runs from the reordered
+characters. Each emitted run is prefixed with an explicit reset so its
+style never depends on whatever run now happens to precede it - a
+dependency reordering breaks, since chunks are free to end up next to
+different neighbors than they had originally.
+"""
+
+import re
+import sys
+
+import bidi.algorithm as bidi
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_RESET = "\x1b[0m"
+
+
+def _chunk_line(line: str) -> tuple[list[tuple[str, str]], str]:
+    """Split a line into (style, text) chunks, plus any trailing styleless codes."""
+    texts = _ANSI.split(line)
+    codes = _ANSI.findall(line)
+
+    chunks: list[tuple[str, str]] = []
+    pending_style = ""
+    for i, text in enumerate(texts):
+        if text:
+            chunks.append((pending_style, text))
+            pending_style = ""
+        if i < len(codes):
+            pending_style += codes[i]
+    return chunks, pending_style
+
+
+def _reorder(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Bidi-reorder chunk text while keeping each character's style attached."""
+    text = "".join(chunk_text for _, chunk_text in chunks)
+    if not text.strip():
+        return chunks
+
+    storage = bidi.get_empty_storage()
+    base_level = bidi.get_base_level(text)
+    storage["base_level"] = base_level
+    storage["base_dir"] = ("L", "R")[base_level]
+
+    bidi.get_embedding_levels(text, storage, False, False)
+
+    index = 0
+    for chunk_id, (_, chunk_text) in enumerate(chunks):
+        for _ in chunk_text:
+            storage["chars"][index]["style_id"] = chunk_id
+            index += 1
+
+    bidi.explicit_embed_and_overrides(storage, False)
+    bidi.resolve_weak_types(storage, False)
+    bidi.resolve_neutral_types(storage, False)
+    bidi.resolve_implicit_levels(storage, False)
+    bidi.reorder_resolved_levels(storage, False)
+    bidi.apply_mirroring(storage, False)
+
+    runs: list[tuple[int, str]] = []
+    for char in storage["chars"]:
+        style_id = char["style_id"]
+        if runs and runs[-1][0] == style_id:
+            runs[-1] = (style_id, runs[-1][1] + char["ch"])
+        else:
+            runs.append((style_id, char["ch"]))
+
+    return [(chunks[style_id][0], run_text) for style_id, run_text in runs]
+
+
+def reorder_line(line: str) -> str:
+    chunks, trailing_style = _chunk_line(line)
+    if not chunks:
+        return line
+    reordered = _reorder(chunks)
+    return "".join(_RESET + style + text for style, text in reordered) + trailing_style
+
+
+def main() -> None:
+    for line in sys.stdin:
+        ending = "\n" if line.endswith("\n") else ""
+        sys.stdout.write(reorder_line(line[: len(line) - len(ending)]) + ending)
+
+
+if __name__ == "__main__":
+    main()
