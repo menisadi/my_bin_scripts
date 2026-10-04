@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# alias-usage — show how many times each alias/function defined in a
+# .zsh_aliases-style file has been used, per atuin or zsh history.
+#
+# Usage: alias-usage [-s atuin|zsh] [file]
+
+set -euo pipefail
+IFS=$'\n\t'
+export LC_ALL=C
+
+usage() {
+    printf 'Usage: %s [-s atuin|zsh] [-f text|csv] [file]\n\n' "$(basename "$0")"
+    printf 'Show how many times each alias/function defined in <file>\n'
+    printf '(default: ~/.zsh_aliases) has been used, per the chosen history source.\n\n'
+    printf 'Arguments:\n'
+    printf '  file             Alias/function definition file to scan (default: ~/.zsh_aliases)\n\n'
+    printf 'Options:\n'
+    printf '  -s, --source     History source: atuin (default) or zsh\n'
+    printf '  -f, --format     Output format: text (default) or csv\n'
+    printf '  -h, --help       Show this help message\n\n'
+    printf 'Requires: rg, and atuin (only when using the atuin source)\n'
+}
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() { _warn "$@"; exit 1; }
+
+source="atuin"
+format="text"
+target_file=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    -s | --source)
+        source="${2:-}"
+        shift 2
+        ;;
+    -f | --format)
+        format="${2:-}"
+        shift 2
+        ;;
+    *)
+        target_file="$1"
+        shift
+        ;;
+    esac
+done
+
+case "${source}" in
+atuin | zsh) ;;
+*) _die "Invalid source: ${source} (expected 'atuin' or 'zsh')" ;;
+esac
+
+case "${format}" in
+text | csv) ;;
+*) _die "Invalid format: ${format} (expected 'text' or 'csv')" ;;
+esac
+
+target_file="${target_file:-${HOME}/.zsh_aliases}"
+
+command -v rg &>/dev/null || _die "Missing required tool: rg"
+[[ "${source}" == "atuin" ]] && { command -v atuin &>/dev/null || _die "Missing required tool: atuin"; }
+
+[[ -f "${target_file}" ]] || _die "Not a file: ${target_file}"
+
+names=$(
+    {
+        rg -oN '^alias\s+([a-zA-Z_][a-zA-Z0-9_]*)=' "${target_file}" -r '$1'
+        rg -oN '^(?:function\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\)\s*\{' "${target_file}" -r '$1'
+    } | sort -u
+)
+
+if [[ "${source}" == "zsh" ]]; then
+    # zsh's extended-history format is ": <ts>:<elapsed>;cmd"; strip that
+    # prefix and take the first word (or the word after sudo) as the
+    # invoked command.
+    counts=$(
+        sed -E 's/^: [0-9]+:[0-9]+;//' "${HOME}/.zsh_history" 2>/dev/null |
+            awk '{cmd=$1; if (cmd=="sudo") cmd=$2; print cmd}' |
+            sort | uniq -c | awk '{print $2, $1}'
+    )
+else
+    # atuin groups history by first word already; -c must be large enough
+    # to cover every distinct command atuin knows about, not just the ones
+    # we want.
+    counts=$(
+        atuin stats -c 20000 |
+            sed -E 's/\x1b\[[0-9;]*m//g' |
+            rg -o '\]\s*([0-9]+)\s+(\S+)' -r '$2 $1'
+    )
+fi
+
+rows=$(
+    while IFS= read -r name; do
+        c=$(awk -v n="${name}" '$1==n{print $2}' <<<"${counts}")
+        printf '%s %s\n' "${c:-0}" "${name}"
+    done <<<"${names}" | sort -rn
+)
+
+if [[ "${format}" == "csv" ]]; then
+    printf 'name,count\n'
+    awk '{print $2","$1}' <<<"${rows}"
+else
+    awk '{printf "%-6s %s\n", $2, $1}' <<<"${rows}"
+fi
