@@ -85,6 +85,7 @@ _trust_untrusted_formulae() {
 
 brew_upgrade_flags=()
 yes_flag="false"
+exit_status=0
 
 while [[ $# -gt 0 ]]; do
   case "${1}" in
@@ -108,7 +109,10 @@ trap 'rm -f "${brew_log}"' EXIT
 
 echo "==> Homebrew"
 brew update
-brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "${brew_log}" >&2)
+brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "${brew_log}" >&2) || {
+  _warn "brew upgrade failed; continuing"
+  exit_status=1
+}
 brew cleanup 2> >(tee -a "${brew_log}" >&2)
 
 echo "==> npm globals"
@@ -130,3 +134,5 @@ echo "==> neovim/minvim (vim.pack)"
 nvim --headless -c "PackUpdate!" -c "qa"
 
 _trust_untrusted_formulae "${brew_log}" "${yes_flag}"
+
+exit "${exit_status}"
