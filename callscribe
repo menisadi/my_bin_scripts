@@ -9,7 +9,12 @@ IFS=$'\n\t'
 readonly PROGRAM_NAME="${0##*/}"
 
 # Defaults, all overridable by environment or flags.
-model_path="${CALLSCRIBE_MODEL:-${HOME}/.local/share/whisper/ivrit-turbo/ggml-model.bin}"
+# An explicit --model or CALLSCRIBE_MODEL wins; otherwise the model follows the
+# language (see the end of option parsing): Hebrew uses the Hebrew-tuned
+# model, anything else the multilingual one.
+model_path="${CALLSCRIBE_MODEL:-}"
+model_path_he="${CALLSCRIBE_MODEL_HE:-${HOME}/.local/share/whisper/ivrit-turbo/ggml-model.bin}"
+model_path_en="${CALLSCRIBE_MODEL_EN:-${HOME}/.local/share/whisper/large-v3-turbo/ggml-model.bin}"
 vad_model_path="${CALLSCRIBE_VAD_MODEL:-${HOME}/.local/share/whisper/vad/ggml-silero-v6.2.0.bin}"
 calls_dir="${CALLSCRIBE_CALLS_DIR:-${HOME}/Recordings/calls}"
 language="${CALLSCRIBE_LANG:-he}"
@@ -56,7 +61,7 @@ file is mono, output is unlabelled and a note explains why.
 
 Options:
   -l, --lang LANG        Spoken language (default: ${language}; "auto" to detect)
-  -m, --model PATH       Whisper ggml model
+  -m, --model PATH       Whisper ggml model (default: chosen by language)
       --vad-model PATH   Silero VAD ggml model
   -s, --speakers "A,B"   Names for the two channels (default: ${speaker_names})
       --swap             Swap the two speaker names
@@ -75,7 +80,9 @@ Options:
   -h, --help             Show this help
 
 Environment:
-  CALLSCRIBE_MODEL       Default whisper model path
+  CALLSCRIBE_MODEL       Whisper model path for every language (overrides the two below)
+  CALLSCRIBE_MODEL_HE    Model for --lang he (default: ${model_path_he})
+  CALLSCRIBE_MODEL_EN    Model for any other language (default: ${model_path_en})
   CALLSCRIBE_VAD_MODEL   Default VAD model path
   CALLSCRIBE_CALLS_DIR   Directory searched by --last (default: ${calls_dir})
   CALLSCRIBE_LANG        Default language
@@ -403,6 +410,14 @@ main() {
     recordings+=("$1")
     shift
   done
+
+  if [[ -z "${model_path}" ]]; then
+    if [[ "${language}" == "he" ]]; then
+      model_path="${model_path_he}"
+    else
+      model_path="${model_path_en}"
+    fi
+  fi
 
   if [[ "${probe_only}" == "true" ]]; then
     _require ffmpeg ffprobe awk
