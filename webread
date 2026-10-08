@@ -1,22 +1,43 @@
 #!/usr/bin/env zsh
-# webread - robustly extract a web page as markdown
-# Usage: webread <url>
+# webread - robustly extract a web page as markdown (cached for offline reading)
+# Usage: webread [--refresh] [--quiet] <url>
+#   --refresh  ignore the cache and fetch again
+#   --quiet    fetch into the cache without printing
 
 set -euo pipefail
 
-url="${1:?Usage: webread <url>}"
+refresh=false quiet=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --refresh) refresh=true && shift ;;
+    --quiet) quiet=true && shift ;;
+    *) break ;;
+  esac
+done
+
+url="${1:?Usage: webread [--refresh] [--quiet] <url>}"
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/webread"
+cache_file="$cache_dir/$(printf '%s' "$url" | shasum -a 256 | cut -d' ' -f1).md"
+
+if [[ "$refresh" == false && -s "$cache_file" ]]; then
+  [[ "$quiet" == true ]] || cat "$cache_file"
+  exit 0
+fi
 
 # Try trafilatura directly first (|| true: may exit non-zero on blocked URLs)
 content=$(trafilatura --markdown -u "$url" 2>/dev/null || true)
 
 # Fallback: fetch with browser user-agent, then pipe to trafilatura
 if [[ -z "$content" ]]; then
-  html=$(curl -sL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" "$url")
+  html=$(curl -sL -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" "$url" || true)
   content=$(echo "$html" | trafilatura --markdown 2>/dev/null || true)
 fi
 
 if [[ -n "$content" ]]; then
-  echo "$content"
+  mkdir -p "$cache_dir"
+  printf '%s\n' "$content" > "$cache_file"
+  [[ "$quiet" == true ]] || echo "$content"
 else
   echo "Could not extract content from: $url" >&2
   exit 1
