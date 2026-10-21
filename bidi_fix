@@ -1,0 +1,36 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["python-bidi"]
+# ///
+"""Reorder each line of stdin into terminal visual order for RTL text.
+
+Leading/trailing ANSI color codes around a line (as printed by `call show`'s
+_style()) are matched outside the reordering, so a colored header survives.
+"""
+
+import re
+import sys
+
+from bidi.algorithm import get_display
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def reorder_line(line: str) -> str:
+    parts = _ANSI.split(line)
+    codes = _ANSI.findall(line)
+    out = [get_display(parts[0])]
+    for code, part in zip(codes, parts[1:]):
+        out.append(code)
+        out.append(get_display(part))
+    return "".join(out)
+
+
+def main() -> None:
+    for line in sys.stdin:
+        ending = "\n" if line.endswith("\n") else ""
+        sys.stdout.write(reorder_line(line[: len(line) - len(ending)]) + ending)
+
+
+if __name__ == "__main__":
+    main()
