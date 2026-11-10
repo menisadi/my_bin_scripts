@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly default_message="Time's up"
+
+usage() {
+    cat <<'EOF'
+Usage: popup [-m MESSAGE] COMMAND [ARGS...]
+
+Run COMMAND, then show a big on-screen alert when it finishes.
+No alert if you cancel it with Ctrl-C. Exits with COMMAND's exit code.
+
+Options:
+  -m, --message MESSAGE  text to show (default: "Time's up")
+  -h, --help             show this help
+
+Uses Hammerspoon's hs.alert (needs require("hs.ipc") in init.lua),
+falls back to a macOS notification via osascript.
+
+Examples:
+  popup pomo 25
+  popup -m "Stretch break" pomo-kitty -s 3 50
+EOF
+}
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() {
+    _warn "$@"
+    exit 1
+}
+
+# Escape backslashes and double quotes for Lua and AppleScript string literals
+_escape() {
+    local text="${1//\\/\\\\}"
+    printf '%s' "${text//\"/\\\"}"
+}
+
+_alert() {
+    local quoted_message
+    quoted_message="$(_escape "${message}")"
+    if ! hs -c "hs.alert.show(\"${quoted_message}\", {textSize=80}, 5)" >/dev/null 2>&1; then
+        osascript -e "display notification \"${quoted_message}\" with title \"popup\""
+    fi
+}
+
+message="${default_message}"
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    -m | --message)
+        if [[ -z "${2:-}" ]]; then
+            _die "popup: --message needs text"
+        fi
+        message="${2}"
+        shift 2
+        ;;
+esac
+
+if [[ -z "${1:-}" ]]; then
+    usage >&2
+    _die "popup: missing command"
+fi
+
+cancelled=0
+trap 'cancelled=1' INT
+
+status=0
+"$@" || status=$?
+
+if [[ "${cancelled}" -eq 0 ]]; then
+    _alert
+fi
+
+exit "${status}"

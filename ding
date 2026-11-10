@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly sound_file="/System/Library/Sounds/Hero.aiff"
+readonly default_volume=3
+
+usage() {
+    cat <<'EOF'
+Usage: ding [-v VOLUME] COMMAND [ARGS...]
+
+Run COMMAND, then play a sound when it finishes.
+No sound if you cancel it with Ctrl-C. Exits with COMMAND's exit code.
+
+Options:
+  -v, --volume VOLUME  afplay volume, scaled by system volume
+                       (default: 3, ~0.3-0.5 is quiet)
+  -h, --help           show this help
+
+Uses macOS afplay. See `popup` for an on-screen alert instead.
+
+Examples:
+  ding pomo 25
+  ding -v 0.5 pomo-kitty -s 3 50
+EOF
+}
+
+_warn() { printf '%s\n' "$*" >&2; }
+_die() {
+    _warn "$@"
+    exit 1
+}
+
+volume="${default_volume}"
+
+case "${1:-}" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    -v | --volume)
+        if [[ -z "${2:-}" ]]; then
+            _die "ding: --volume needs a number"
+        fi
+        volume="${2}"
+        shift 2
+        ;;
+esac
+
+if [[ ! "${volume}" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+    _die "ding: volume must be a number, got '${volume}'"
+fi
+
+if [[ -z "${1:-}" ]]; then
+    usage >&2
+    _die "ding: missing command"
+fi
+
+cancelled=0
+trap 'cancelled=1' INT
+
+status=0
+"$@" || status=$?
+
+if [[ "${cancelled}" -eq 0 ]]; then
+    afplay -v "${volume}" "${sound_file}"
+fi
+
+exit "${status}"
