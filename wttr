@@ -18,7 +18,6 @@ curl -s 'wttr.in/{Yeruham,Tel+Aviv,Ein+Hacarmel,Chicago,Baltimore}?format=%l:+%c
     fi
 
     loc_p="$(printf '%-18s' "${loc}:")"
-    icon_p="$(printf '%-3s'  "$icon")"
     temp_p="$(printf '%6s'   "$temp")"
     time_p="$(printf '%8s'   "$time")"
 
