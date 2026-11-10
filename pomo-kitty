@@ -1,0 +1,102 @@
+#!/usr/bin/env -S uv run --script
+import argparse
+import shutil
+import time
+
+DEFAULT_MINUTES = 25
+DEFAULT_SCALE = 1
+SCREEN_FRACTION = 0.8
+TIMER_TEXT_WIDTH = len(" 00:00")
+
+
+def format_time(seconds_left: int) -> str:
+    m, s = divmod(seconds_left, 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def sized(text: str, scale: int) -> str:
+    # Kitty text sizing protocol (OSC 66), needs kitty >= 0.40
+    if scale == 1:
+        return text
+    return f"\x1b]66;s={scale};{text}\x07"
+
+
+def fit_bar_width(scale: int) -> int:
+    columns = shutil.get_terminal_size().columns
+    return max(1, int(columns * SCREEN_FRACTION) // scale - TIMER_TEXT_WIDTH)
+
+
+def pomodoro(minutes: int, bar_width: int, scale: int) -> None:
+    total_seconds = minutes * 60
+    start_time = time.time()
+
+    if scale > 1:
+        # Reserve vertical room so the scaled block doesn't scroll mid-draw
+        print("\n" * (scale - 1) + f"\x1b[{scale - 1}A", end="", flush=True)
+
+    try:
+        while True:
+            elapsed = int(time.time() - start_time)
+            if elapsed > total_seconds:
+                break
+
+            remaining = total_seconds - elapsed
+            progress = elapsed / total_seconds if total_seconds else 1
+            filled = int(bar_width * progress)
+
+            bar = "█" * filled + "░" * (bar_width - filled)
+            timer_str = format_time(remaining)
+
+            print(f"\r{sized(f'{bar} {timer_str}', scale)}", end="", flush=True)
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("\n" * scale + "Timer cancelled.")
+        return
+
+    # Scaled text can't spare room for the full message, keep it within the timer's width
+    done_suffix = " 00:00  ✅ Done!" if scale == 1 else " ✅"
+    done_line = sized(f"{'█' * bar_width}{done_suffix}", scale)
+    print(f"\r\x1b[K{done_line}" + "\n" * scale, end="")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Simple terminal Pomodoro timer.")
+    parser.add_argument(
+        "minutes",
+        nargs="?",
+        type=int,
+        default=DEFAULT_MINUTES,
+        help=f"Length of the timer in minutes (default: {DEFAULT_MINUTES})",
+    )
+    parser.add_argument(
+        "-w",
+        "--width",
+        type=int,
+        default=None,
+        help="Width of the progress bar (default: fit ~80%% of the window)",
+    )
+    parser.add_argument(
+        "-s",
+        "--scale",
+        type=int,
+        choices=range(1, 8),
+        default=DEFAULT_SCALE,
+        metavar="1-7",
+        help=(
+            "Text scale via kitty's text sizing protocol (default: 1, no scaling). "
+            "Uses about SCALE x (WIDTH + 6) columns, so lower -w if you set it"
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    print(f"Starting a {args.minutes}-minute pomodoro ")
+    bar_width = args.width if args.width is not None else fit_bar_width(args.scale)
+    pomodoro(args.minutes, bar_width, args.scale)
+
+
+if __name__ == "__main__":
+    main()
+# vim: ft=python
