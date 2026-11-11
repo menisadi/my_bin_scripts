@@ -397,10 +397,10 @@ def filter_albums_only(albums: list[dict]) -> list[dict]:
 def album_status(a: dict) -> str:
     """Return status label for an album: Y (full), P (partial), N (unheard).
 
-    Uses tracks_heard if available (per-track userplaycount from API).
-    Falls back to comparing total scrobbles vs track count as a heuristic:
-    if you've scrobbled fewer times than there are tracks, you likely haven't
-    heard them all.
+    album.getinfo only returns an album-level userplaycount (no per-track
+    counts), so tracks_heard is always 0 in practice. Status is a heuristic:
+    fewer scrobbles than tracks means P, otherwise Y. This can't tell a full
+    listen from one track on repeat.
     """
     if a["user_playcount"] == 0:
         return "N"
