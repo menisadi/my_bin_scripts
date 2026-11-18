@@ -27,13 +27,25 @@ Usage: $(basename "${0}") [-y|--yes]
 EOF
 }
 
-# Prompts to `brew trust` any tap formulae that brew upgrade/cleanup skipped
-# as untrusted, resolving each formula's tap from its install receipt.
+# Prompts to `brew trust` any tap formulae that brew skipped or ignored as
+# untrusted. Handles both brew's `brew trust --formula <tap>/<formula>` hint
+# (already qualified) and per-formula "Skipping" warnings (tap resolved from
+# the install receipt).
 _trust_untrusted_formulae() {
   local log="$1"
   local auto_yes="$2"
+  local -a qualified_names=()
   local -a names=()
   local line
+  while IFS= read -r line; do
+    qualified_names+=("${line}")
+  done < <(
+    grep -E '^[[:space:]]+brew trust --formula [^<]' "${log}" \
+      | sed -E 's/^[[:space:]]+brew trust --formula //' \
+      | tr ' ' '\n' \
+      | sed '/^$/d' \
+      | sort -u
+  )
   while IFS= read -r line; do
     names+=("${line}")
   done < <(
@@ -42,15 +54,15 @@ _trust_untrusted_formulae() {
       | sort -u
   )
 
-  if ((${#names[@]} == 0)); then
+  if ((${#qualified_names[@]} == 0 && ${#names[@]} == 0)); then
     return 0
   fi
 
   echo
-  echo "==> Untrusted tap formulae skipped during upgrade:"
-  printf '  - %s\n' "${names[@]}"
+  echo "==> Untrusted tap formulae skipped or ignored by brew:"
+  printf '  - %s\n' "${qualified_names[@]+"${qualified_names[@]}"}" "${names[@]+"${names[@]}"}"
 
-  if ! command -v jq >/dev/null 2>&1; then
+  if ((${#names[@]} > 0)) && ! command -v jq >/dev/null 2>&1; then
     _warn "jq not found; run 'brew trust --formula <tap>/<formula>' manually to trust these."
     return 0
   fi
@@ -68,7 +80,10 @@ _trust_untrusted_formulae() {
   fi
 
   local name tap
-  for name in "${names[@]}"; do
+  for name in "${qualified_names[@]+"${qualified_names[@]}"}"; do
+    brew trust --formula "${name}"
+  done
+  for name in "${names[@]+"${names[@]}"}"; do
     local -a receipt_paths=("$(brew --cellar)/${name}"/*/INSTALL_RECEIPT.json)
     if [[ ! -f "${receipt_paths[0]}" ]]; then
       _warn "Could not find install receipt for ${name}; skipping trust"
@@ -108,7 +123,7 @@ brew_log="$(mktemp)"
 trap 'rm -f "${brew_log}"' EXIT
 
 echo "==> Homebrew"
-brew update
+brew update > >(tee -a "${brew_log}") 2> >(tee -a "${brew_log}" >&2)
 brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "${brew_log}" >&2) || {
   _warn "brew upgrade failed; continuing"
   exit_status=1
