@@ -3,7 +3,10 @@ set -euo pipefail
 IFS=$'\n\t'
 
 _warn() { printf '%s\n' "$*" >&2; }
-_die() { _warn "$@"; exit 1; }
+_die() {
+  _warn "$@"
+  exit 1
+}
 
 UV_COOLDOWN_DAYS=7
 
@@ -40,18 +43,18 @@ _trust_untrusted_formulae() {
   while IFS= read -r line; do
     qualified_names+=("${line}")
   done < <(
-    grep -E '^[[:space:]]+brew trust --formula [^<]' "${log}" \
-      | sed -E 's/^[[:space:]]+brew trust --formula //' \
-      | tr ' ' '\n' \
-      | sed '/^$/d' \
-      | sort -u
+    grep -E '^[[:space:]]+brew trust --formula [^<]' "${log}" |
+      sed -E 's/^[[:space:]]+brew trust --formula //' |
+      tr ' ' '\n' |
+      sed '/^$/d' |
+      sort -u
   )
   while IFS= read -r line; do
     names+=("${line}")
   done < <(
-    grep -E '^Warning: Skipping [^:]+: tap formula is not trusted$' "${log}" \
-      | sed -E 's/^Warning: Skipping ([^:]+):.*/\1/' \
-      | sort -u
+    grep -E '^Warning: Skipping [^:]+: tap formula is not trusted$' "${log}" |
+      sed -E 's/^Warning: Skipping ([^:]+):.*/\1/' |
+      sort -u
   )
 
   if ((${#qualified_names[@]} == 0 && ${#names[@]} == 0)); then
@@ -104,18 +107,18 @@ exit_status=0
 
 while [[ $# -gt 0 ]]; do
   case "${1}" in
-    -y|--yes)
-      brew_upgrade_flags+=(--yes)
-      yes_flag="true"
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      _die "Unknown option: ${1}"
-      ;;
+  -y | --yes)
+    brew_upgrade_flags+=(--yes)
+    yes_flag="true"
+    shift
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    _die "Unknown option: ${1}"
+    ;;
   esac
 done
 
