@@ -101,6 +101,27 @@ _trust_untrusted_formulae() {
   done
 }
 
+# Installs only outdated npm globals. `npm update -g` reinstalls every global
+# package because they carry no integrity metadata for npm to compare against.
+_npm_upgrade_globals() {
+  local -a packages=()
+  local line
+  while IFS= read -r line; do
+    packages+=("${line}")
+  done < <(
+    npm outdated -g --parseable |
+      cut -d: -f2 |
+      sed '/^$/d'
+  )
+
+  if ((${#packages[@]} == 0)); then
+    echo "Nothing to upgrade"
+    return 0
+  fi
+
+  npm install -g "${packages[@]}"
+}
+
 brew_upgrade_flags=()
 yes_flag="false"
 exit_status=0
@@ -134,7 +155,7 @@ brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "
 brew cleanup 2> >(tee -a "${brew_log}" >&2)
 
 echo "==> npm globals"
-npm update -g
+_npm_upgrade_globals
 
 echo "==> uv tools"
 uv tool upgrade --all --exclude-newer "$(_days_ago "${UV_COOLDOWN_DAYS}")"
