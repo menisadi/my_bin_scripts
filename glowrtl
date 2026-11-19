@@ -4,23 +4,26 @@ IFS=$'\n\t'
 
 usage() {
     cat <<'EOF'
-Usage: glowrtl [-w WIDTH] [-p] FILE...
+Usage: glowrtl [-w WIDTH] [-p] [-r] FILE...
 
 Render markdown with glow, reordered for RTL reading with styling preserved.
 Equivalent to: glow -s dark -w WIDTH FILE... | bidi_glow
 
   -w WIDTH   word-wrap width (default: current terminal width via `tput cols`)
   -p         page the output through `less -R`
+  -r         force RTL base direction on every line (e.g. mixed-language tables)
   -h         show this help
 EOF
 }
 
 width=""
 use_pager=0
-while getopts ":w:ph" opt; do
+base="auto"
+while getopts ":w:prh" opt; do
     case "${opt}" in
         w) width="${OPTARG}" ;;
         p) use_pager=1 ;;
+        r) base="rtl" ;;
         h) usage; exit 0 ;;
         *) usage >&2; exit 1 ;;
     esac
@@ -30,7 +33,7 @@ shift $((OPTIND - 1))
 width="${width:-$(tput cols)}"
 
 if [[ "${use_pager}" -eq 1 ]]; then
-    glow -s dark -w "${width}" "$@" | bidi_glow | less -R
+    glow -s dark -w "${width}" "$@" | bidi_glow --base "${base}" | less -R
 else
-    glow -s dark -w "${width}" "$@" | bidi_glow
+    glow -s dark -w "${width}" "$@" | bidi_glow --base "${base}"
 fi

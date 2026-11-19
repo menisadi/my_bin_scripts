@@ -20,6 +20,7 @@ dependency reordering breaks, since chunks are free to end up next to
 different neighbors than they had originally.
 """
 
+import argparse
 import re
 import sys
 
@@ -45,14 +46,18 @@ def _chunk_line(line: str) -> tuple[list[tuple[str, str]], str]:
     return chunks, pending_style
 
 
-def _reorder(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def _reorder(
+    chunks: list[tuple[str, str]], base: str = "auto"
+) -> list[tuple[str, str]]:
     """Bidi-reorder chunk text while keeping each character's style attached."""
     text = "".join(chunk_text for _, chunk_text in chunks)
     if not text.strip():
         return chunks
 
     storage = bidi.get_empty_storage()
-    base_level = bidi.get_base_level(text)
+    base_level = {"ltr": 0, "rtl": 1}.get(base, -1)
+    if base_level < 0:
+        base_level = bidi.get_base_level(text)
     storage["base_level"] = base_level
     storage["base_dir"] = ("L", "R")[base_level]
 
@@ -82,19 +87,30 @@ def _reorder(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(chunks[style_id][0], run_text) for style_id, run_text in runs]
 
 
-def reorder_line(line: str) -> str:
+def reorder_line(line: str, base: str = "auto") -> str:
     chunks, trailing_style = _chunk_line(line)
     if not chunks:
         return line
-    reordered = _reorder(chunks)
+    reordered = _reorder(chunks, base)
     return "".join(_RESET + style + text for style, text in reordered) + trailing_style
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--base",
+        choices=["auto", "rtl", "ltr"],
+        default="auto",
+        help="base direction for every line (default: auto, per line)",
+    )
+    args = parser.parse_args()
     for line in sys.stdin:
         ending = "\n" if line.endswith("\n") else ""
-        sys.stdout.write(reorder_line(line[: len(line) - len(ending)]) + ending)
+        sys.stdout.write(
+            reorder_line(line[: len(line) - len(ending)], args.base) + ending
+        )
 
 
 if __name__ == "__main__":
     main()
+# vim: ft=python
