@@ -26,8 +26,8 @@ usage() {
   cat <<EOF
 Usage: $(basename "${0}") [-y|--yes] [-q|--quiet]
 
-  -y, --yes    Skip confirmation prompts (passes --yes to brew upgrade;
-               also auto-trusts any untrusted tap formulae found)
+  -y, --yes    Pass --yes to brew upgrade (untrusted tap formulae are
+               still prompted for, never auto-trusted)
   -q, --quiet  Hide tool output; show one status line per step
                (requires --yes, since hidden prompts would hang)
   -h, --help   Show this help
@@ -107,7 +107,6 @@ _record_changes() {
 # the install receipt).
 _trust_untrusted_formulae() {
   local log="$1"
-  local auto_yes="$2"
   local -a qualified_names=()
   local -a names=()
   local line
@@ -142,9 +141,7 @@ _trust_untrusted_formulae() {
   fi
 
   local reply="n"
-  if [[ "${auto_yes}" == "true" ]]; then
-    reply="y"
-  elif [[ -t 0 ]]; then
+  if [[ -t 0 ]]; then
     read -rp "Trust these now? [y/N] " reply
   else
     _warn "Non-interactive shell; skipping trust prompt. Run 'brew trust --formula <tap>/<formula>' manually."
@@ -289,7 +286,7 @@ _step "neovim (lazy.nvim)" _lazy_update kvim
 _step "astronvim (lazy.nvim)" _lazy_update astronvim
 _step "neovim/minvim (vim.pack)" _pack_update
 
-_trust_untrusted_formulae "${brew_log}" "${yes_flag}"
+_trust_untrusted_formulae "${brew_log}"
 
 _record_changes brew "${brew_before}" "$(_brew_versions)"
 _record_changes npm "${npm_before}" "$(_npm_versions)"
