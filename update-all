@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329  # step functions are invoked indirectly via _step/trap
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -9,6 +10,7 @@ _die() {
 }
 
 UV_COOLDOWN_DAYS=7
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}"
 
 # Portability: GNU date (Linux) vs BSD date (macOS) relative-date syntax differs.
 _days_ago() {
@@ -22,12 +24,81 @@ _days_ago() {
 
 usage() {
   cat <<EOF
-Usage: $(basename "${0}") [-y|--yes]
+Usage: $(basename "${0}") [-y|--yes] [-q|--quiet]
 
-  -y, --yes   Skip confirmation prompts (passes --yes to brew upgrade;
-              also auto-trusts any untrusted tap formulae found)
-  -h, --help  Show this help
+  -y, --yes    Skip confirmation prompts (passes --yes to brew upgrade;
+               also auto-trusts any untrusted tap formulae found)
+  -q, --quiet  Hide tool output; show one status line per step
+               (requires --yes, since hidden prompts would hang)
+  -h, --help   Show this help
+
+A summary of what changed is printed at the end.
 EOF
+}
+
+# Runs a step. In quiet mode, output goes to a per-step log and only a
+# status line is shown; on failure, the log tail is printed.
+_step() {
+  local title="$1"
+  shift
+  if [[ "${quiet_flag}" == "false" ]]; then
+    printf '==> %s\n' "${title}"
+    "$@"
+    return
+  fi
+  local step_log="${log_dir}/${title//[^[:alnum:]]/_}.log"
+  local status=0
+  printf '==> %-28s ' "${title}"
+  "$@" >"${step_log}" 2>&1 || status=$?
+  if ((status == 0)); then
+    printf '✓\n'
+  else
+    printf '✗\n'
+    tail -n 20 "${step_log}" >&2
+    _warn "Full log: ${step_log}"
+  fi
+  return "${status}"
+}
+
+# Version snapshots, one "name<TAB>version" per line.
+_brew_versions() {
+  brew list --versions 2>/dev/null | awk '{ print $1 "\t" $NF }' || true
+}
+
+_npm_versions() {
+  npm ls -g --depth=0 --json 2>/dev/null |
+    jq -r '.dependencies // {} | to_entries[] | "\(.key)\t\(.value.version)"' 2>/dev/null || true
+}
+
+_uv_versions() {
+  uv tool list 2>/dev/null | awk '!/^-/ && NF >= 2 { print $1 "\t" $2 }' || true
+}
+
+_lazy_versions() {
+  local lock_file="$1"
+  [[ -f "${lock_file}" ]] &&
+    jq -r 'to_entries[] | "\(.key)\t\(.value.commit[0:7])"' "${lock_file}" 2>/dev/null || true
+}
+
+_pack_versions() {
+  local lock_file="$1"
+  [[ -f "${lock_file}" ]] &&
+    jq -r '.plugins | to_entries[] | "\(.key)\t\(.value.rev[0:7])"' "${lock_file}" 2>/dev/null || true
+}
+
+# Appends "label: name old → new" to the summary for each changed entry.
+_record_changes() {
+  local label="$1"
+  local before="$2"
+  local after="$3"
+  local name new old
+  while IFS=$'\t' read -r name new; do
+    old="$(printf '%s\n' "${before}" | awk -F'\t' -v n="${name}" '$1 == n { print $2 }')"
+    summary+=("$(printf '%s: %s %s → %s' "${label}" "${name}" "${old:-(new)}" "${new}")")
+  done < <(
+    comm -13 <(printf '%s\n' "${before}" | sort) <(printf '%s\n' "${after}" | sort) |
+      sed '/^$/d'
+  )
 }
 
 # Prompts to `brew trust` any tap formulae that brew skipped or ignored as
@@ -101,6 +172,18 @@ _trust_untrusted_formulae() {
   done
 }
 
+_brew_update() {
+  brew update > >(tee -a "${brew_log}") 2> >(tee -a "${brew_log}" >&2)
+}
+
+_brew_upgrade() {
+  brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "${brew_log}" >&2)
+}
+
+_brew_cleanup() {
+  brew cleanup 2> >(tee -a "${brew_log}" >&2)
+}
+
 # Installs only outdated npm globals. `npm update -g` reinstalls every global
 # package because they carry no integrity metadata for npm to compare against.
 _npm_upgrade_globals() {
@@ -122,15 +205,46 @@ _npm_upgrade_globals() {
   npm install -g "${packages[@]}"
 }
 
+_uv_upgrade() {
+  uv tool upgrade --all --exclude-newer "$(_days_ago "${UV_COOLDOWN_DAYS}")"
+}
+
+_vim_plug_update() {
+  vim -es -u ~/.vimrc -i NONE -c "PlugUpdate" -c "qa"
+}
+
+_lazy_update() {
+  NVIM_APPNAME="$1" nvim --headless "+Lazy! update" +qa
+}
+
+_pack_update() {
+  nvim --headless -c "PackUpdate!" -c "qa"
+}
+
+_cleanup() {
+  local status=$?
+  if ((status != 0)) && [[ "${quiet_flag}" == "true" ]]; then
+    _warn "Logs kept in ${log_dir}"
+    return
+  fi
+  rm -rf "${log_dir}"
+}
+
 brew_upgrade_flags=()
 yes_flag="false"
+quiet_flag="false"
 exit_status=0
+summary=()
 
 while [[ $# -gt 0 ]]; do
   case "${1}" in
   -y | --yes)
     brew_upgrade_flags+=(--yes)
     yes_flag="true"
+    shift
+    ;;
+  -q | --quiet)
+    quiet_flag="true"
     shift
     ;;
   -h | --help)
@@ -143,35 +257,53 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-brew_log="$(mktemp)"
-trap 'rm -f "${brew_log}"' EXIT
+if [[ "${quiet_flag}" == "true" && "${yes_flag}" == "false" ]]; then
+  _die "--quiet requires --yes (brew prompts would be hidden)"
+fi
 
-echo "==> Homebrew"
-brew update > >(tee -a "${brew_log}") 2> >(tee -a "${brew_log}" >&2)
-brew upgrade "${brew_upgrade_flags[@]+"${brew_upgrade_flags[@]}"}" 2> >(tee -a "${brew_log}" >&2) || {
+log_dir="$(mktemp -d)"
+brew_log="${log_dir}/brew-all.log"
+trap _cleanup EXIT
+
+kvim_lock="${CONFIG_DIR}/kvim/lazy-lock.json"
+astronvim_lock="${CONFIG_DIR}/astronvim/lazy-lock.json"
+pack_lock="${CONFIG_DIR}/nvim/nvim-pack-lock.json"
+
+brew_before="$(_brew_versions)"
+npm_before="$(_npm_versions)"
+uv_before="$(_uv_versions)"
+kvim_before="$(_lazy_versions "${kvim_lock}")"
+astronvim_before="$(_lazy_versions "${astronvim_lock}")"
+pack_before="$(_pack_versions "${pack_lock}")"
+
+_step "Homebrew update" _brew_update
+_step "Homebrew upgrade" _brew_upgrade || {
   _warn "brew upgrade failed; continuing"
   exit_status=1
 }
-brew cleanup 2> >(tee -a "${brew_log}" >&2)
-
-echo "==> npm globals"
-_npm_upgrade_globals
-
-echo "==> uv tools"
-uv tool upgrade --all --exclude-newer "$(_days_ago "${UV_COOLDOWN_DAYS}")"
-
-echo "==> vim (vim-plug)"
-vim -es -u ~/.vimrc -i NONE -c "PlugUpdate" -c "qa"
-
-echo "==> neovim (lazy.nvim)"
-NVIM_APPNAME=kvim nvim --headless "+Lazy! update" +qa
-
-echo "==> astronvim (lazy.nvim)"
-NVIM_APPNAME=astronvim nvim --headless "+Lazy! update" +qa
-
-echo "==> neovim/minvim (vim.pack)"
-nvim --headless -c "PackUpdate!" -c "qa"
+_step "Homebrew cleanup" _brew_cleanup
+_step "npm globals" _npm_upgrade_globals
+_step "uv tools" _uv_upgrade
+_step "vim (vim-plug)" _vim_plug_update
+_step "neovim (lazy.nvim)" _lazy_update kvim
+_step "astronvim (lazy.nvim)" _lazy_update astronvim
+_step "neovim/minvim (vim.pack)" _pack_update
 
 _trust_untrusted_formulae "${brew_log}" "${yes_flag}"
+
+_record_changes brew "${brew_before}" "$(_brew_versions)"
+_record_changes npm "${npm_before}" "$(_npm_versions)"
+_record_changes uv "${uv_before}" "$(_uv_versions)"
+_record_changes kvim "${kvim_before}" "$(_lazy_versions "${kvim_lock}")"
+_record_changes astronvim "${astronvim_before}" "$(_lazy_versions "${astronvim_lock}")"
+_record_changes minvim "${pack_before}" "$(_pack_versions "${pack_lock}")"
+
+echo
+echo "==> Summary"
+if ((${#summary[@]} == 0)); then
+  echo "  Nothing updated"
+else
+  printf '  %s\n' "${summary[@]}"
+fi
 
 exit "${exit_status}"
